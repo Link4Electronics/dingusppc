@@ -285,8 +285,8 @@ rom_info rom_identity[] = {
     rom( 0x020f03, 0x21c12c81, "Q45xc"          , nullptr    , nullptr  , nullptr                                             ) // PowerMac8,15
     rom( 0x020f03, 0x221d2c85, "Q45xc"          , nullptr    , nullptr  , nullptr                                             ) // PowerMac8,15
     rom( 0x020f03, 0x9e7f55ef, "Neoc"           , nullptr    , nullptr  , nullptr                                             ) // PowerMac8,15
-    rom( 0x028101, 0xf4dc2533, nullptr          , "Q88"      , nullptr  , "Mac mini G4"                                       ) // PowerMac10,1 // 2005-03-23 489f4
-    rom( 0x028201, 0xf4dc2533, nullptr          , "Q88"      , nullptr  , "Mac mini G4 1.5GHz Radeon 9200"                    ) // PowerMac10,2 // 2005-07-12 494f1
+    rom( 0x028101, 0xf4dc2533, nullptr          , "Q88"      , "q88"    , "Mac mini G4"                                       ) // PowerMac10,1 // 2005-03-23 489f4
+    rom( 0x028201, 0xf4dc2533, nullptr          , "Q88"      , "q88"    , "Mac mini G4 1.5GHz Radeon 9200"                    ) // PowerMac10,2 // 2005-07-12 494f1
     rom( 0x030101,          0, nullptr          , "M23"      , nullptr  , "iMac G5 (iSight)"                                  ) // PowerMac12,1
 
     rom( 0x108100, 0x71fd2fc9, "P1"             , "P1"       , nullptr  , "iBook G3 (Original/Clamshell)"                     ) // PowerBook2,1

@@ -1,0 +1,421 @@
+/*
+DingusPPC - The Experimental PowerPC Macintosh emulator
+Copyright (C) 2018-26 The DingusPPC Development Team
+          (See CREDITS.MD for more details)
+
+(You may also contact divingkxt or powermax2286 on Discord)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/** Intrepid (UniNorth 2) emulation. */
+
+#include <core/endianswap.h>
+#include <devices/common/hwcomponent.h>
+#include <devices/common/hwinterrupt.h>
+#include <devices/deviceregistry.h>
+#include <devices/memctrl/intrepid.h>
+#include <loguru.hpp>
+
+#include <algorithm>
+#include <cinttypes>
+#include <cstring>
+#include <string>
+
+/* Number of trailing zero bits; returns 32 for a zero value. */
+static int ctz32(uint32_t val) {
+    int n = 0;
+    if (!val)
+        return 32;
+    while (!(val & 1)) {
+        val >>= 1;
+        n++;
+    }
+    return n;
+}
+
+IntrepidPciHostDevice::IntrepidPciHostDevice(std::string name, int dev_id)
+    : PCIDevice(name)
+{
+    supports_types(HWCompType::PCI_DEV);
+
+    // populate PCI config header
+    this->vendor_id   = PCI_VENDOR_APPLE;
+    this->device_id   = dev_id;
+    this->class_rev   = 0x06000000;
+    this->cache_ln_sz = 8;
+    this->lat_timer   = 0x10;
+}
+
+uint32_t IntrepidPciHostDevice::pci_cfg_read(uint32_t reg_offs, AccessDetails &details)
+{
+    if (reg_offs < 64) {
+        return PCIDevice::pci_cfg_read(reg_offs, details);
+    }
+    LOG_READ_UNIMPLEMENTED_CONFIG_REGISTER();
+    return 0; // PCI Spec §6.1
+}
+
+void IntrepidPciHostDevice::pci_cfg_write(uint32_t reg_offs, uint32_t value, AccessDetails &details)
+{
+    if (reg_offs < 64) {
+        PCIDevice::pci_cfg_write(reg_offs, value, details);
+        return;
+    }
+    LOG_WRITE_UNIMPLEMENTED_CONFIG_REGISTER();
+}
+
+Intrepid::Intrepid() : MemCtrlBase(), PCIDevice("Intrepid"), PCIHost()
+{
+    supports_types(HWCompType::MEM_CTRL | HWCompType::MMIO_DEV |
+                   HWCompType::PCI_HOST | HWCompType::PCI_DEV);
+
+    // populate PCI config header of the main bus host bridge (UniNorth PCI)
+    this->vendor_id   = PCI_VENDOR_APPLE;
+    this->device_id   = 0x0017;
+    this->class_rev   = 0x06000000;
+    this->cache_ln_sz = 8;
+    this->lat_timer   = 0x10;
+
+    // add memory mapped I/O region for the UniNorth control registers
+    this->add_mmio_region(UNI_N_REGISTER_BLOCK, 0x1000, this);
+
+    // add memory mapped I/O regions for the PCI configuration windows.
+    // Each window has a config addr register at base + 0x800000 and a
+    // config data port at base + 0xC00000 (per linux setup_uninorth()).
+    // The main bus additionally decodes an 8 MB PCI I/O space at 0xF2000000.
+    this->add_mmio_region(UNI_N_AGP_CONFIG_ADDR,      0x1000, this);
+    this->add_mmio_region(UNI_N_AGP_CONFIG_DATA,      0x1000, this);
+    this->add_mmio_region(UNI_N_MAIN_IO_SPACE,        0x800000, this);
+    this->add_mmio_region(UNI_N_MAIN_CONFIG_ADDR,     0x1000, this);
+    this->add_mmio_region(UNI_N_MAIN_CONFIG_DATA,     0x1000, this);
+    this->add_mmio_region(UNI_N_INTERNAL_CONFIG_ADDR, 0x1000, this);
+    this->add_mmio_region(UNI_N_INTERNAL_CONFIG_DATA, 0x1000, this);
+
+    // select the PCI host to use for each configuration window
+    this->hosts[UNI_N_WINDOW_AGP]      = &this->agp_host;
+    this->hosts[UNI_N_WINDOW_MAIN]     = this;
+    this->hosts[UNI_N_WINDOW_INTERNAL] = &this->internal_host;
+
+    // PCI devices that represent the AGP and internal host bridges on
+    // their respective buses.
+    this->agp_dev = std::unique_ptr<IntrepidPciHostDevice>(
+        new IntrepidPciHostDevice("UniNorth AGP", 0x0018));
+    this->internal_dev = std::unique_ptr<IntrepidPciHostDevice>(
+        new IntrepidPciHostDevice("UniNorth Internal PCI", 0x001E));
+}
+
+int Intrepid::device_postinit()
+{
+    // register the three host bridges at device 11 of their own buses,
+    // as seen on real UniNorth G4 hardware
+    this->pci_register_device(DEV_FUN(0x0B, 0), this);
+    this->agp_host.pci_register_device(DEV_FUN(0x0B, 0), this->agp_dev.get());
+    this->internal_host.pci_register_device(DEV_FUN(0x0B, 0), this->internal_dev.get());
+
+    this->pcihost_device_postinit();
+    this->agp_host.pcihost_device_postinit();
+    this->internal_host.pcihost_device_postinit();
+
+    return 0;
+}
+
+void Intrepid::setup_ram(int capacity_megs)
+{
+    if (capacity_megs) {
+        uint64_t ram_size = (uint64_t)capacity_megs << 20;
+        if (ram_size > 0xFFFFFFFFULL) {
+            LOG_F(ERROR, "Intrepid: requested RAM size %d MB too large", capacity_megs);
+            return;
+        }
+        if (!this->add_ram_region(0, (uint32_t)ram_size)) {
+            LOG_F(WARNING, "Intrepid: %d MB RAM allocation failed (maybe already exists?)",
+                capacity_megs);
+        }
+    }
+}
+
+uint32_t Intrepid::read(uint32_t rgn_start, uint32_t offset, int size)
+{
+    switch (rgn_start) {
+    case UNI_N_REGISTER_BLOCK:
+        return this->read_unin_register(offset, size);
+
+    case UNI_N_AGP_CONFIG_ADDR:
+        return this->config_addr[UNI_N_WINDOW_AGP];
+
+    case UNI_N_AGP_CONFIG_DATA:
+        return this->config_read(UNI_N_WINDOW_AGP, offset, size);
+
+    case UNI_N_MAIN_IO_SPACE:
+        // PCI I/O space
+        return pci_io_read_broadcast(offset, size);
+
+    case UNI_N_MAIN_CONFIG_ADDR:
+        return this->config_addr[UNI_N_WINDOW_MAIN];
+
+    case UNI_N_MAIN_CONFIG_DATA:
+        return this->config_read(UNI_N_WINDOW_MAIN, offset, size);
+
+    case UNI_N_INTERNAL_CONFIG_ADDR:
+        return this->config_addr[UNI_N_WINDOW_INTERNAL];
+
+    case UNI_N_INTERNAL_CONFIG_DATA:
+        return this->config_read(UNI_N_WINDOW_INTERNAL, offset, size);
+
+    default:
+        LOG_F(ERROR, "%s: read from unknown MMIO region 0x%08x @0x%08x.%c",
+            this->name.c_str(), rgn_start, offset, SIZE_ARG(size));
+    }
+
+    return 0;
+}
+
+void Intrepid::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int size)
+{
+    switch (rgn_start) {
+    case UNI_N_REGISTER_BLOCK:
+        this->write_unin_register(offset, value, size);
+        return;
+
+    case UNI_N_AGP_CONFIG_ADDR:
+        this->config_addr[UNI_N_WINDOW_AGP] = value;
+        return;
+
+    case UNI_N_AGP_CONFIG_DATA:
+        this->config_write(UNI_N_WINDOW_AGP, offset, size, value);
+        return;
+
+    case UNI_N_MAIN_IO_SPACE:
+        // PCI I/O space
+        pci_io_write_broadcast(offset, size, value);
+        return;
+
+    case UNI_N_MAIN_CONFIG_ADDR:
+        this->config_addr[UNI_N_WINDOW_MAIN] = value;
+        return;
+
+    case UNI_N_MAIN_CONFIG_DATA:
+        this->config_write(UNI_N_WINDOW_MAIN, offset, size, value);
+        return;
+
+    case UNI_N_INTERNAL_CONFIG_ADDR:
+        this->config_addr[UNI_N_WINDOW_INTERNAL] = value;
+        return;
+
+    case UNI_N_INTERNAL_CONFIG_DATA:
+        this->config_write(UNI_N_WINDOW_INTERNAL, offset, size, value);
+        return;
+
+    default:
+        LOG_F(ERROR, "%s: write to unknown MMIO region 0x%08x @0x%08x.%c = 0x%0*x",
+            this->name.c_str(), rgn_start, offset, SIZE_ARG(size), size * 2,
+            BYTESWAP_SIZED(value, size));
+    }
+}
+
+uint32_t Intrepid::read_unin_register(uint32_t offset, int size)
+{
+    switch (offset & 0xFFF) {
+    case UNI_N_VERSION:
+        // Intrepid revision 0x00D2, as found in the Mac mini G4
+        return 0x00D2;
+    case UNI_N_CLOCK_CNTL:
+        return this->clock_cntl;
+    case UNI_N_POWER_MGT:
+        return this->power_mgt;
+    case UNI_N_ARB_CTRL:
+        return this->arb_ctrl;
+    case UNI_N_CPU_NUMBER:
+        // CPU 0 reads zero, which tells the bootROM it is the boot CPU
+        return 0;
+    case UNI_N_HWINIT_STATE:
+        // report a running (non-wakeup) hardware state
+        return 0x02;
+    case UNI_N_AACK_DELAY:
+        return this->aack_delay;
+    default:
+        return 0;
+    }
+}
+
+void Intrepid::write_unin_register(uint32_t offset, uint32_t value, int size)
+{
+    switch (offset & 0xFFF) {
+    case UNI_N_CLOCK_CNTL:
+        this->clock_cntl = value;
+        return;
+    case UNI_N_POWER_MGT:
+        this->power_mgt = value;
+        return;
+    case UNI_N_ARB_CTRL:
+        this->arb_ctrl = value;
+        return;
+    case UNI_N_AACK_DELAY:
+        this->aack_delay = value;
+        return;
+    default:
+        LOG_F(WARNING, "%s: write to unimplemented register 0x%03x.%c = 0x%0*x",
+            this->name.c_str(), offset, SIZE_ARG(size), size * 2,
+            BYTESWAP_SIZED(value, size));
+    }
+}
+
+/* Translate a UniNorth config address into the standard PCI format.
+   This implements the same logic as QEMU's unin_get_config_reg():
+
+   - bit 31 set:      standard PCI format passed through (also produced by
+                      the Apple MacRISCI CFA0 scheme)
+   - bit 0 set:       standard PCI type 1 format (Apple MacRISCI CFA1)
+   - otherwise:       Apple IDSEL-based scheme used by Open Firmware
+   The byte lane within the config data port (addr & 7) is folded into
+   the low bits of the result. */
+static uint32_t unin_get_config_reg(uint32_t reg, uint32_t addr)
+{
+    uint32_t retval;
+
+    if (reg & (1u << 31)) {
+        retval = reg | (addr & 3);
+    } else if (reg & 1) {
+        retval = (reg & ~7u) | (addr & 7);
+    } else {
+        uint32_t slot = ctz32(reg & 0xFFFFF800U);
+        if (slot == 32)
+            slot = 0;
+        uint32_t func = (reg >> 8) & 7;
+        retval = (reg & (0xff - 7)) | (addr & 7);
+        retval |= slot << 11;
+        retval |= func << 8;
+    }
+
+    return retval;
+}
+
+uint32_t Intrepid::config_read(int window, uint32_t offset, int size)
+{
+    PCIHost *host = this->hosts[window];
+    uint32_t config_addr = this->config_addr[window];
+    uint32_t config_addr2 = unin_get_config_reg(config_addr, offset & 7);
+
+    int bus_num = (config_addr2 >> 16) & 0xFF;
+    int dev_num = (config_addr2 >> 11) & 0x1F;
+    int fun_num = (config_addr2 >> 8) & 0x07;
+    uint8_t reg_offs = config_addr2 & 0xFC;
+
+    AccessDetails details;
+    details.size = size;
+    details.offset = config_addr2 & 3;
+    details.flags = PCI_CONFIG_READ |
+        (bus_num ? PCI_CONFIG_TYPE_1 : PCI_CONFIG_TYPE_0);
+
+    PCIBase *device = bus_num ? host->pci_find_device(bus_num, dev_num, fun_num)
+                              : host->pci_find_device(dev_num, fun_num);
+    if (device) {
+        uint32_t value = device->pci_cfg_read(reg_offs, details);
+        // bytes 0 to 3 repeat
+        return pci_conv_rd_data(value, value, details);
+    }
+
+    LOG_READ_NON_EXISTENT_PCI_DEVICE();
+    return 0xFFFFFFFFUL; // PCI spec §6.1
+}
+
+void Intrepid::config_write(int window, uint32_t offset, uint32_t value, int size)
+{
+    PCIHost *host = this->hosts[window];
+    uint32_t config_addr = this->config_addr[window];
+    uint32_t config_addr2 = unin_get_config_reg(config_addr, offset & 7);
+
+    int bus_num = (config_addr2 >> 16) & 0xFF;
+    int dev_num = (config_addr2 >> 11) & 0x1F;
+    int fun_num = (config_addr2 >> 8) & 0x07;
+    uint8_t reg_offs = config_addr2 & 0xFC;
+
+    AccessDetails details;
+    details.size = size;
+    details.offset = config_addr2 & 3;
+    details.flags = PCI_CONFIG_WRITE |
+        (bus_num ? PCI_CONFIG_TYPE_1 : PCI_CONFIG_TYPE_0);
+
+    PCIBase *device = bus_num ? host->pci_find_device(bus_num, dev_num, fun_num)
+                              : host->pci_find_device(dev_num, fun_num);
+    if (device) {
+        if (size == 4 && !details.offset) { // aligned DWORD writes -> fast path
+            device->pci_cfg_write(reg_offs, BYTESWAP_32(value), details);
+            return;
+        }
+        // otherwise perform necessary data transformations -> slow path
+        uint32_t old_val = details.size == 4 ? 0 : device->pci_cfg_read(reg_offs, details);
+        uint32_t new_val = pci_conv_wr_data(old_val, value, details);
+        device->pci_cfg_write(reg_offs, new_val, details);
+        return;
+    }
+    LOG_WRITE_NON_EXISTENT_PCI_DEVICE();
+}
+
+uint32_t Intrepid::pci_cfg_read(uint32_t reg_offs, AccessDetails &details)
+{
+    if (reg_offs < 64) {
+        return PCIDevice::pci_cfg_read(reg_offs, details);
+    }
+
+    switch (reg_offs) {
+    case 0x48: // kMacRISCPCIAddressSelect
+        return this->macrisc_addr_select;
+    default:
+        LOG_READ_UNIMPLEMENTED_CONFIG_REGISTER();
+    }
+
+    return 0; // PCI Spec §6.1
+}
+
+void Intrepid::pci_cfg_write(uint32_t reg_offs, uint32_t value, AccessDetails &details)
+{
+    if (reg_offs < 64) {
+        PCIDevice::pci_cfg_write(reg_offs, value, details);
+        return;
+    }
+
+    switch (reg_offs) {
+    case 0x48: // kMacRISCPCIAddressSelect
+        this->macrisc_addr_select = value;
+        return;
+    default:
+        LOG_WRITE_UNIMPLEMENTED_CONFIG_REGISTER();
+    }
+}
+
+static const PropMap Intrepid_Properties = {
+    {"pci_A1",
+        new StrProperty("")},
+    {"pci_B1",
+        new StrProperty("")},
+    {"pci_C1",
+        new StrProperty("")},
+    {"pci_D1",
+        new StrProperty("")},
+    {"pci_E1",
+        new StrProperty("")},
+    {"pci_F1",
+        new StrProperty("")},
+    {"pci_G1",
+        new StrProperty("")},
+};
+
+static const DeviceDescription Intrepid_Descriptor = {
+    Intrepid::create, {}, Intrepid_Properties,
+    HWCompType::MEM_CTRL | HWCompType::MMIO_DEV | HWCompType::PCI_HOST | HWCompType::PCI_DEV
+};
+
+REGISTER_DEVICE(Intrepid, Intrepid_Descriptor);
