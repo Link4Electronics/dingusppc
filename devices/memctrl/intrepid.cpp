@@ -91,6 +91,10 @@ Intrepid::Intrepid() : MemCtrlBase(), PCIDevice("Intrepid"), PCIHost()
     // add memory mapped I/O region for the UniNorth control registers
     this->add_mmio_region(UNI_N_REGISTER_BLOCK, 0x1000, this);
 
+    // add memory mapped I/O region for the boot ROM's early PCI quiesce
+    // config window (0x80008000 and 0x80008800 within a single 4 KiB range)
+    this->add_mmio_region(UNI_N_CONFIG_WINDOW, 0x1000, this);
+
     // add memory mapped I/O regions for the PCI configuration windows.
     // Each window has a config addr register at base + 0x800000 and a
     // config data port at base + 0xC00000 (per linux setup_uninorth()).
@@ -152,6 +156,9 @@ uint32_t Intrepid::read(uint32_t rgn_start, uint32_t offset, int size)
     case UNI_N_REGISTER_BLOCK:
         return this->read_unin_register(offset, size);
 
+    case UNI_N_CONFIG_WINDOW:
+        return this->read_config_window(offset, size);
+
     case UNI_N_AGP_CONFIG_ADDR:
         return this->config_addr[UNI_N_WINDOW_AGP];
 
@@ -187,6 +194,10 @@ void Intrepid::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
     switch (rgn_start) {
     case UNI_N_REGISTER_BLOCK:
         this->write_unin_register(offset, value, size);
+        return;
+
+    case UNI_N_CONFIG_WINDOW:
+        this->write_config_window(offset, value, size);
         return;
 
     case UNI_N_AGP_CONFIG_ADDR:
@@ -241,8 +252,7 @@ uint32_t Intrepid::read_unin_register(uint32_t offset, int size)
         // CPU 0 reads zero, which tells the bootROM it is the boot CPU
         return 0;
     case UNI_N_HWINIT_STATE:
-        // report a running (non-wakeup) hardware state
-        return 0x02;
+        return this->hwinit_state;
     case UNI_N_AACK_DELAY:
         return this->aack_delay;
     default:
@@ -265,8 +275,64 @@ void Intrepid::write_unin_register(uint32_t offset, uint32_t value, int size)
     case UNI_N_AACK_DELAY:
         this->aack_delay = value;
         return;
+    case UNI_N_HWINIT_STATE:
+        this->hwinit_state = value;
+        return;
     default:
         LOG_F(WARNING, "%s: write to unimplemented register 0x%03x.%c = 0x%0*x",
+            this->name.c_str(), offset, SIZE_ARG(size), size * 2,
+            BYTESWAP_SIZED(value, size));
+    }
+}
+
+/* Boot ROM config window at 0x80008000 / 0x80008800.
+
+   The Mac mini G4 boot ROM's early PCI quiesce code drives this window
+   (via stwbrx/lwbrx, so register values arrive byte-swapped) as follows:
+
+       [base+0x00] <- 0xFFFF0000       reset / set up the window
+       [base+0x14] <- 0x00010001
+       [base+0x0C] <- descriptor table pointer (in ROM)
+       [base+0x00] <- 0x80008000       window base select
+       [base+0x00] <- 0x00010001       GO: execute the descriptor table
+       poll [base+0x04] bit 0x400      cleared when execution completes
+
+   The descriptor tables (0xFFF02DB0 fast / 0xFFF02E20 slow) describe
+   memory-controller calibration curves which our flat RAM emulation does
+   not need; we only report the "done" state so the poll terminates. */
+uint32_t Intrepid::read_config_window(uint32_t offset, int size)
+{
+    uint32_t reg = offset & 0x1F;
+
+    switch (reg) {
+    case 0x04: // status: bit 0x400 = busy, clear when the init completes
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+void Intrepid::write_config_window(uint32_t offset, uint32_t value, int size)
+{
+    int window = (offset >> 11) & 1; // 0 = 0x80008000, 1 = 0x80008800
+    uint32_t reg = offset & 0x1F;
+
+    switch (reg) {
+    case 0x00: // command register (values arrive byte-swapped from stwbrx)
+        if (BYTESWAP_32(value) == 0x00010001) { // GO command
+            LOG_F(INFO, "%s: config window %d GO, descriptor table @0x%08X",
+                this->name.c_str(), window, this->config_window_ptr[window]);
+        }
+        break;
+    case 0x0C: // descriptor table pointer
+        this->config_window_ptr[window] = BYTESWAP_32(value);
+        LOG_F(INFO, "%s: config window %d descriptor table @0x%08X",
+            this->name.c_str(), window, this->config_window_ptr[window]);
+        break;
+    case 0x14: // secondary command
+        break;
+    default:
+        LOG_F(WARNING, "%s: write to config window register 0x%03x.%c = 0x%0*x",
             this->name.c_str(), offset, SIZE_ARG(size), size * 2,
             BYTESWAP_SIZED(value, size));
     }

@@ -39,9 +39,11 @@ static const std::vector<PciIrqMap> intrepid_agp_irq_map = {
 // UniNorth main PCI bus IRQ mapping.
 static const std::vector<PciIrqMap> intrepid_main_irq_map = {
     {nullptr        , DEV_FUN(0x0B,0)                  }, // UniNorth PCI
-    {"pci_KeyLargo" , DEV_FUN(0x0D,0), IntSrc::INT_UNKNOWN }, // KeyLargo
-    {"pci_USB"      , DEV_FUN(0x0E,0), IntSrc::INT_UNKNOWN }, // USB
-    {"pci_USB2"     , DEV_FUN(0x0F,0), IntSrc::INT_UNKNOWN }, // USB
+    {"pci_KeyLargo" , DEV_FUN(0x17,0), IntSrc::INT_UNKNOWN }, // KeyLargo mac-io
+    {"pci_USB"      , DEV_FUN(0x18,0), IntSrc::INT_UNKNOWN }, // KeyLargo USB
+    {"pci_USB2"     , DEV_FUN(0x19,0), IntSrc::INT_UNKNOWN }, // KeyLargo USB
+    {"pci_USB3"     , DEV_FUN(0x1A,0), IntSrc::INT_UNKNOWN }, // KeyLargo USB
+    {"pci_USB4"     , DEV_FUN(0x1B,0), IntSrc::INT_UNKNOWN }, // NEC USB
 };
 
 // UniNorth internal PCI bus IRQ mapping.
@@ -62,6 +64,14 @@ int MachineQ88::initialize(const std::string &id) {
     // get pointer to the memory controller/primary PCI bridge object
     Intrepid* intrepid_obj = dynamic_cast<Intrepid*>(gMachineObj->get_comp_by_name("Intrepid"));
     intrepid_obj->set_irq_map(intrepid_main_irq_map);
+
+    // register KeyLargo mac-io at 00:17.0 on the main PCI bus
+    PCIBase* keylargo = dynamic_cast<PCIBase*>(gMachineObj->get_comp_by_name("KeyLargo"));
+    if (!keylargo) {
+        LOG_F(ERROR, "KeyLargo device not found!");
+        return -1;
+    }
+    intrepid_obj->pci_register_device(DEV_FUN(0x17,0), keylargo);
 
     // allocate ROM region (New World: 1 MB at 0xFFF00000)
     if (!intrepid_obj->add_rom_region(0xFFF00000, 0x100000)) {
@@ -93,6 +103,10 @@ static const PropMap q88_settings = {
         new StrProperty("")},
     {"pci_USB2",
         new StrProperty("")},
+    {"pci_USB3",
+        new StrProperty("")},
+    {"pci_USB4",
+        new StrProperty("")},
     {"pci_FireWire",
         new StrProperty("")},
     {"pci_GMAC",
@@ -101,6 +115,7 @@ static const PropMap q88_settings = {
 
 static std::vector<std::string> q88_devices = {
     "Intrepid",
+    "KeyLargo",
 };
 
 static const DeviceDescription MachineQ88_descriptor = {
