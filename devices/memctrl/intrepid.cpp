@@ -91,6 +91,12 @@ Intrepid::Intrepid() : MemCtrlBase(), PCIDevice("Intrepid"), PCIHost()
     // add memory mapped I/O region for the UniNorth control registers
     this->add_mmio_region(UNI_N_REGISTER_BLOCK, 0x1000, this);
 
+    // add memory mapped I/O region for the UniNorth I2C controller
+    // (i2c@f8001000) and the memory controller clock registers
+    // (0xF8002000 block, incl. the 0xF8002500 CPU clock PLL register)
+    this->add_mmio_region(UNI_N_I2C_BLOCK, 0x1000, this);
+    this->add_mmio_region(UNI_N_CLK_BLOCK, 0x1000, this);
+
     // add memory mapped I/O region for the boot ROM's early PCI quiesce
     // config window (0x80008000 and 0x80008800 within a single 4 KiB range)
     this->add_mmio_region(UNI_N_CONFIG_WINDOW, 0x1000, this);
@@ -156,6 +162,12 @@ uint32_t Intrepid::read(uint32_t rgn_start, uint32_t offset, int size)
     case UNI_N_REGISTER_BLOCK:
         return this->read_unin_register(offset, size);
 
+    case UNI_N_I2C_BLOCK:
+        return this->read_i2c_register(offset, size);
+
+    case UNI_N_CLK_BLOCK:
+        return this->read_clk_register(offset, size);
+
     case UNI_N_CONFIG_WINDOW:
         return this->read_config_window(offset, size);
 
@@ -194,6 +206,14 @@ void Intrepid::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
     switch (rgn_start) {
     case UNI_N_REGISTER_BLOCK:
         this->write_unin_register(offset, value, size);
+        return;
+
+    case UNI_N_I2C_BLOCK:
+        this->write_i2c_register(offset, value, size);
+        return;
+
+    case UNI_N_CLK_BLOCK:
+        this->write_clk_register(offset, value, size);
         return;
 
     case UNI_N_CONFIG_WINDOW:
@@ -283,6 +303,119 @@ void Intrepid::write_unin_register(uint32_t offset, uint32_t value, int size)
             this->name.c_str(), offset, SIZE_ARG(size), size * 2,
             BYTESWAP_SIZED(value, size));
     }
+}
+
+/* UniNorth I2C controller (0xF8001000 block).
+
+   The boot ROM's I2C byte routines (0xfff8b51c read / 0xfff8b5b4 write /
+   0xfff8b8d0 reset) poll the STATUS register and abort to an error path
+   when STATUS_ACK bit 1 is clear. No devices are attached to this bus, so
+   report every transfer as completed and acknowledged: STATUS reads return
+   all four "phase done" bits (0x0F) and STATUS_ACK reads return bit 1 (0x02),
+   which lets every "wait until bit set" poll exit immediately. */
+uint32_t Intrepid::read_i2c_register(uint32_t offset, int size)
+{
+    switch (offset) {
+    case UNI_N_I2C_STATUS_ACK:
+        return 0x02; // last transfer acknowledged
+    case UNI_N_I2C_STATUS:
+        return 0x0F; // address/data/stop phases all complete
+    case UNI_N_I2C_MODE:
+        return this->i2c_mode;
+    case UNI_N_I2C_CTRL:
+        return this->i2c_ctrl;
+    case UNI_N_I2C_IER:
+        return this->i2c_ier;
+    case UNI_N_I2C_ADDR:
+        return this->i2c_addr;
+    case UNI_N_I2C_SUBADDR:
+        return this->i2c_subaddr;
+    case UNI_N_I2C_DATA:
+        return this->i2c_data;
+    case UNI_N_I2C_SSADDR:
+        return this->i2c_ssaddr;
+    case UNI_N_I2C_ADDR_CTL:
+        return this->i2c_addr_ctl;
+    case UNI_N_I2C_DATA2:
+        return this->i2c_data2;
+    default:
+        return 0;
+    }
+}
+
+void Intrepid::write_i2c_register(uint32_t offset, uint32_t value, int size)
+{
+    uint8_t byte = value & 0xFF;
+
+    switch (offset) {
+    case UNI_N_I2C_STATUS_ACK:
+    case UNI_N_I2C_STATUS:
+        // status/ISR writes are transfer-control commands; no devices on
+        // the bus, so ignore them
+        return;
+    case UNI_N_I2C_MODE:
+        this->i2c_mode = byte;
+        return;
+    case UNI_N_I2C_CTRL:
+        this->i2c_ctrl = byte;
+        return;
+    case UNI_N_I2C_IER:
+        this->i2c_ier = byte;
+        return;
+    case UNI_N_I2C_ADDR:
+        this->i2c_addr = byte;
+        return;
+    case UNI_N_I2C_SUBADDR:
+        this->i2c_subaddr = byte;
+        return;
+    case UNI_N_I2C_DATA:
+        this->i2c_data = byte;
+        return;
+    case UNI_N_I2C_SSADDR:
+        this->i2c_ssaddr = byte;
+        return;
+    case UNI_N_I2C_ADDR_CTL:
+        this->i2c_addr_ctl = value;
+        return;
+    case UNI_N_I2C_DATA2:
+        this->i2c_data2 = value;
+        return;
+    default:
+        LOG_F(9, "%s: i2c register write @0x%03x.%c = 0x%0*x",
+            this->name.c_str(), offset, SIZE_ARG(size), size * 2,
+            BYTESWAP_SIZED(value, size));
+    }
+}
+
+/* Memory controller clock registers (0xF8002000 block).
+
+   The boot ROM writes the SUN I2C mode bytes (0xF80021C0 + 0x40*n) and the
+   clock control registers (0xF8002080, 0xF8002180), and read-modify-writes
+   the CPU clock PLL register 0xF8002500. All but 0xF8002500 are write-only
+   from the ROM's point of view. */
+uint32_t Intrepid::read_clk_register(uint32_t offset, int size)
+{
+    if (offset == UNI_N_CLK_REG) {
+        if (size == 1)
+            return (this->clk_reg >> 24) & 0xFF; // big-endian byte lane 0
+        return this->clk_reg;
+    }
+    return 0;
+}
+
+void Intrepid::write_clk_register(uint32_t offset, uint32_t value, int size)
+{
+    if (offset == UNI_N_CLK_REG) {
+        if (size == 1)
+            this->clk_reg = (this->clk_reg & 0x00FFFFFF) |
+                            ((value & 0xFF) << 24);
+        else
+            this->clk_reg = value;
+        return;
+    }
+    LOG_F(9, "%s: clock register write @0x%03x.%c = 0x%0*x",
+        this->name.c_str(), offset, SIZE_ARG(size), size * 2,
+        BYTESWAP_SIZED(value, size));
 }
 
 /* Boot ROM config window at 0x80008000 / 0x80008800.

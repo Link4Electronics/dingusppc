@@ -115,11 +115,45 @@ ViaPmu::ViaPmu() : HWComponent() {
 
     this->intbits = 0;
     this->intmask = 0;
+    this->one_sec_timer_id = 0;
+}
+
+ViaPmu::~ViaPmu()
+{
+    if (this->one_sec_timer_id) {
+        TimerManager::get_instance()->cancel_timer(this->one_sec_timer_id);
+        this->one_sec_timer_id = 0;
+    }
 }
 
 int ViaPmu::device_postinit()
 {
+    // route the PMU interrupt line to the machine's interrupt controller
+    // (KeyLargo's OpenPIC, via-pmu source 25 on the Mac mini G4)
+    this->int_ctrl = dynamic_cast<InterruptCtrl*>(
+        gMachineObj->get_comp_by_type(HWCompType::INT_CTRL));
+    if (this->int_ctrl)
+        this->irq_id = this->int_ctrl->register_dev_int(IntSrc::VIA_CUDA);
+
+    // 1-second tick (matches QEMU macio/pmu.c pmu_one_sec_timer)
+    this->one_sec_timer_id = TimerManager::get_instance()->add_cyclic_timer(
+        MSECS_TO_NSECS(1000), [this]() { this->one_sec_tick(); });
+
     return 0;
+}
+
+void ViaPmu::one_sec_tick()
+{
+    this->intbits |= PMU_INT_TICK;
+    this->pmu_update_extirq();
+}
+
+void ViaPmu::pmu_update_extirq()
+{
+    if (!this->int_ctrl)
+        return;
+    bool irq_state = (this->intbits & this->intmask) != 0;
+    this->int_ctrl->ack_int(this->irq_id, irq_state);
 }
 
 uint8_t ViaPmu::read(int reg)
@@ -334,19 +368,37 @@ void ViaPmu::dispatch_cmd()
     case 0x70: // PMU_SET_INTR_MASK
         this->intmask = this->cmd_buf[0];
         LOG_F(INFO, "PMU_SET_INTR_MASK = 0x%02X", this->intmask);
+        this->pmu_update_extirq();
         break;
     case 0x78: // PMU_INT_ACK
         this->cmd_rsp[0] = this->intbits;
         this->intbits = 0;
         this->cmd_rsp_sz = 1;
         LOG_F(INFO, "PMU_INT_ACK -> 0x%02X", this->cmd_rsp[0]);
+        this->pmu_update_extirq();
         break;
     case 0x7e: // PMU_SHUTDOWN
         LOG_F(INFO, "PMU_SHUTDOWN: powering off");
         power_off(po_shut_down);
         break;
     case 0x8f: // PMU_POWER_EVENTS
-        LOG_F(INFO, "PMU_POWER_EVENTS, arg = 0x%02X", this->cmd_buf[0]);
+        // QEMU macio/pmu.c: GET powerup/wakeup event registers report no
+        // events; SET/CLR are accepted but do nothing.
+        switch (this->cmd_buf[0]) {
+        case 0x00: // PMU_PWR_GET_POWERUP_EVENTS
+        case 0x03: // PMU_PWR_GET_WAKEUP_EVENTS
+            this->cmd_rsp[0] = 0;
+            this->cmd_rsp[1] = 0;
+            this->cmd_rsp_sz = 2;
+            break;
+        case 0x01: // PMU_PWR_SET_POWERUP_EVENTS
+        case 0x02: // PMU_PWR_CLR_POWERUP_EVENTS
+        case 0x04: // PMU_PWR_SET_WAKEUP_EVENTS
+        case 0x05: // PMU_PWR_CLR_WAKEUP_EVENTS
+        default:
+            break;
+        }
+        LOG_F(INFO, "PMU_POWER_EVENTS, subcmd = 0x%02X", this->cmd_buf[0]);
         break;
     case 0x9a: { // PMU_I2C_CMD
         // args: bus, mode, bus2, address, sub_addr, comb_addr, count, data...
@@ -365,7 +417,8 @@ void ViaPmu::dispatch_cmd()
         break;
     }
     case 0xd0: // PMU_RESET
-        LOG_F(INFO, "PMU_RESET");
+        LOG_F(INFO, "PMU_RESET: restarting");
+        power_off(po_restart);
         break;
     case 0xdc: // PMU_GET_COVER
         this->cmd_rsp[0] = 0; // cover open

@@ -95,7 +95,8 @@ public:
                                       MMIODevice* dev_instance);
     AddressMapEntry* find_range_contains(uint32_t addr, uint32_t size);
     AddressMapEntry* find_range_overlaps(uint32_t addr, uint32_t size);
-    bool is_range_free(uint32_t addr, uint32_t size);
+    bool is_range_free(uint32_t addr, uint32_t size,
+                       bool allow_rom_shadow = false);
 
     AddressMapEntry* find_rom_region();
 

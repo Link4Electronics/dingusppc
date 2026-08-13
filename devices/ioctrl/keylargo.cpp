@@ -33,10 +33,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 using namespace std;
 
-// IRQ IDs handed out by the KeyLargo interrupt controller (OpenPIC source
-// numbers, see the device tree). Not used for signaling yet.
-#define KL_IRQ_ID(intx) (1ULL << intx)
-
 KeyLargo::KeyLargo() : PCIDevice("KeyLargo"), InterruptCtrl() {
     supports_types(HWCompType::MMIO_DEV | HWCompType::PCI_DEV | HWCompType::INT_CTRL);
 
@@ -52,8 +48,10 @@ KeyLargo::KeyLargo() : PCIDevice("KeyLargo"), InterruptCtrl() {
         this->notify_bar_change(bar_num);
     };
 
-    // connect the VIA-PMU
+    // connect the VIA-PMU and the OpenPIC (both are created before KeyLargo
+    // as KeyLargo subdevices)
     this->viapmu = dynamic_cast<ViaPmu*>(gMachineObj->get_comp_by_name("ViaPmu"));
+    this->openpic = dynamic_cast<OpenPic*>(gMachineObj->get_comp_by_name("OpenPic"));
 }
 
 int KeyLargo::device_postinit()
@@ -104,6 +102,8 @@ uint32_t KeyLargo::read(uint32_t rgn_start, uint32_t offset, int size) {
     case KL_SUB_I2C:
         return this->i2c_read(abs_offset & 0xFFF, size);
     default:
+        if (sub_addr >= KL_SUB_OPENPIC && this->openpic)
+            return this->openpic->read(0, abs_offset - KL_OPENPIC_BASE, size);
         if (!(this->unsupported_read_mask & (1 << sub_addr))) {
             this->unsupported_read_mask |= (1 << sub_addr);
             LOG_F(WARNING, "%s: read @%x.%c", this->get_name().c_str(),
@@ -129,6 +129,10 @@ void KeyLargo::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
         this->i2c_write(abs_offset & 0xFFF, value, size);
         break;
     default:
+        if (sub_addr >= KL_SUB_OPENPIC && this->openpic) {
+            this->openpic->write(0, abs_offset - KL_OPENPIC_BASE, value, size);
+            break;
+        }
         if (!(this->unsupported_write_mask & (1 << sub_addr))) {
             this->unsupported_write_mask |= (1 << sub_addr);
             LOG_F(WARNING, "%s: write @%x.%c = %0*x", this->get_name().c_str(),
@@ -264,49 +268,27 @@ void KeyLargo::i2c_write(uint32_t offset, uint32_t value, int size)
 uint64_t KeyLargo::register_dev_int(IntSrc src_id)
 {
     // KeyLargo's interrupt controller is the OpenPIC at mac-io+0x40000.
-    // OpenPIC source numbers from the device tree.
-    switch (src_id) {
-    case IntSrc::ATA        : return KL_IRQ_ID(24);
-    case IntSrc::VIA_CUDA   : return KL_IRQ_ID(25); // via-pmu
-    case IntSrc::SCCA       : return KL_IRQ_ID(22);
-    case IntSrc::SCCB       : return KL_IRQ_ID(23);
-    case IntSrc::DAVBUS     : return KL_IRQ_ID(30); // I2S
-    case IntSrc::NMI        : return KL_IRQ_ID(32); // timer
-    case IntSrc::USB        : return KL_IRQ_ID(26); // i2c
-    default:
-        ABORT_F("%s: unknown interrupt source %d", this->name.c_str(), src_id);
-    }
-    return 0;
+    return this->openpic->register_dev_int(src_id);
 }
 
 uint64_t KeyLargo::register_dma_int(IntSrc src_id)
 {
-    switch (src_id) {
-    case IntSrc::DMA_IDE0 : return KL_IRQ_ID(24 + 12);
-    case IntSrc::DMA_SCCA_Tx : return KL_IRQ_ID(22 + 5);
-    case IntSrc::DMA_SCCA_Rx : return KL_IRQ_ID(22 + 6);
-    case IntSrc::DMA_SCCB_Tx : return KL_IRQ_ID(23 + 7);
-    case IntSrc::DMA_SCCB_Rx : return KL_IRQ_ID(23 + 8);
-    case IntSrc::DMA_DAVBUS_Tx : return KL_IRQ_ID(30 + 1);
-    case IntSrc::DMA_DAVBUS_Rx : return KL_IRQ_ID(30 + 2);
-    default:
-        ABORT_F("%s: unknown DMA interrupt source %d", this->name.c_str(), src_id);
-    }
-    return 0;
+    return this->openpic->register_dma_int(src_id);
 }
 
 void KeyLargo::ack_int(uint64_t irq_id, uint8_t irq_line_state)
 {
-    // OpenPIC not implemented yet; the PMU/PCI interrupts are polled.
+    this->openpic->ack_int(irq_id, irq_line_state);
 }
 
 void KeyLargo::ack_dma_int(uint64_t irq_id, uint8_t irq_line_state)
 {
-    // OpenPIC not implemented yet.
+    this->openpic->ack_dma_int(irq_id, irq_line_state);
 }
 
 static const vector<string> KeyLargo_Subdevices = {
-    "ViaPmu"
+    "ViaPmu",
+    "OpenPic"
 };
 
 static const DeviceDescription KeyLargo_Descriptor = {

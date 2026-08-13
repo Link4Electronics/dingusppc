@@ -47,6 +47,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <devices/common/hwinterrupt.h>
 #include <devices/common/pci/pcidevice.h>
 #include <devices/common/viapmu.h>
+#include <devices/ioctrl/openpic.h>
 
 #include <cinttypes>
 #include <memory>
@@ -93,6 +94,11 @@ enum KeyLargoSubBlock : uint32_t {
     KL_SUB_OPENPIC = 0x40,
 };
 
+/* The OpenPIC occupies the top 256 KiB of the KeyLargo window
+   (mac-io + 0x40000, sub-blocks 0x40..0x7F). */
+#define KL_OPENPIC_BASE (KL_BAR0_BASE + 0x40000)
+#define KL_OPENPIC_SIZE 0x40000
+
 /** KeyLargo I2C controller registers (offsets within the 0x18 sub-block). */
 enum KeyLargoI2CReg : uint32_t {
     KL_I2C_CTRL   = 0x00,
@@ -133,7 +139,8 @@ private:
     uint32_t i2c_read(uint32_t offset, int size);
     void i2c_write(uint32_t offset, uint32_t value, int size);
 
-    ViaPmu* viapmu;
+    ViaPmu*  viapmu;
+    OpenPic* openpic;
 
     uint32_t base_addr   = 0;
     int      iomem_size  = 0x80000;

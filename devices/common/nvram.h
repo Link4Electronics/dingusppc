@@ -23,6 +23,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define NVRAM_H
 
 #include <devices/common/hwcomponent.h>
+#include <devices/common/mmiodevice.h>
 
 #include <cinttypes>
 #include <memory>
@@ -34,7 +35,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
     automatically saved to and restored from the dedicated file.
  */
 
-class NVram : public HWComponent {
+class NVram : public MMIODevice {
 public:
     NVram(std::string file_name = "nvram.bin", uint32_t ram_size = 8192);
     ~NVram();
@@ -46,6 +47,9 @@ public:
     uint8_t read_byte(uint32_t offset);
     void write_byte(uint32_t offset, uint8_t value);
     uint32_t get_of_nvram_offset() { return of_nvram_offset; }
+
+    uint32_t read(uint32_t rgn_start, uint32_t offset, int size) override;
+    void write(uint32_t rgn_start, uint32_t offset, uint32_t value, int size) override;
 
 private:
     std::string file_name; // file name for the backing file

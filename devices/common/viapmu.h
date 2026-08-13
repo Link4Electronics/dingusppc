@@ -25,7 +25,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #ifndef VIA_PMU_H
 #define VIA_PMU_H
 
+#include <core/timermanager.h>
 #include <devices/common/hwcomponent.h>
+#include <devices/common/hwinterrupt.h>
 
 #include <cinttypes>
 #include <string>
@@ -58,10 +60,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define PMU_CMD_BUF_SIZE 128
 #define PMU_RSP_BUF_SIZE 128
 
+/* PMU interrupt bits (macio/pmu.h) */
+#define PMU_INT_ADB        0x10 // ADB autopoll or reply data
+#define PMU_INT_TICK       0x80 // 1-second tick interrupt
+
 class ViaPmu : public HWComponent {
 public:
     ViaPmu();
-    ~ViaPmu() = default;
+    ~ViaPmu() override;
 
     static std::unique_ptr<HWComponent> create() {
         return std::unique_ptr<ViaPmu>(new ViaPmu());
@@ -76,6 +82,8 @@ private:
     void set_sr_int();
     void pmu_update();
     void dispatch_cmd();
+    void pmu_update_extirq();
+    void one_sec_tick();
 
     // VIA registers (raw, no port-direction gating of the PMU handshake)
     uint8_t via_portb = 0;
@@ -103,6 +111,11 @@ private:
     // PMU state
     uint8_t intbits = 0;
     uint8_t intmask = 0;
+
+    // PMU interrupt line (OpenPIC via-pmu source) and 1-second tick timer
+    InterruptCtrl* int_ctrl = nullptr;
+    uint64_t       irq_id = 0;
+    uint32_t       one_sec_timer_id = 0;
 };
 
 #endif // VIA_PMU_H

@@ -148,11 +148,18 @@ AddressMapEntry* MemCtrlBase::find_range_overlaps(uint32_t addr, uint32_t size) 
 }
 
 
-bool MemCtrlBase::is_range_free(uint32_t addr, uint32_t size) {
+bool MemCtrlBase::is_range_free(uint32_t addr, uint32_t size, bool allow_rom_shadow) {
     bool result = true;
     if (size) {
         uint32_t end = addr + size - 1;
         for (auto& entry : address_map) {
+            // when requested, a range may overlap a ROM region (e.g. an
+            // NVRAM chip that shadows part of the boot ROM). The MMIO entry
+            // is then inserted ahead of the ROM region in add_mmio_region()
+            // so it takes precedence in find_range().
+            if (allow_rom_shadow && (entry->type & RT_ROM))
+                continue;
+
             if (addr == entry->start && end == entry->end) {
                 LOG_F(WARNING, "memory region 0x%X..0x%X%s%s%s already exists",
                     addr, end,
@@ -334,13 +341,24 @@ AddressMapEntry* MemCtrlBase::add_mmio_region(uint32_t start_addr, uint32_t size
 {
     AddressMapEntry *entry;
 
+    // determine whether this range shadows a ROM region (e.g. the NVRAM
+    // at 0xFFF04000 inside the boot ROM window)
+    bool shadows_rom = false;
+    uint32_t end = start_addr + size - 1;
+    for (auto& map_entry : address_map) {
+        if ((map_entry->type & RT_ROM) &&
+            end >= map_entry->start && start_addr <= map_entry->end) {
+            shadows_rom = true;
+            break;
+        }
+    }
+
     // bail out if a memory region for the given range already exists
-    if (!is_range_free(start_addr, size))
+    if (!is_range_free(start_addr, size, shadows_rom))
         return nullptr;
 
     entry = new AddressMapEntry;
 
-    uint32_t end   = start_addr + size - 1;
     entry->start   = start_addr;
     entry->end     = end;
     entry->mirror  = 0;
@@ -348,7 +366,12 @@ AddressMapEntry* MemCtrlBase::add_mmio_region(uint32_t start_addr, uint32_t size
     entry->devobj  = dev_instance;
     entry->mem_ptr = 0;
 
-    this->address_map.push_back(entry);
+    // MMIO regions that shadow a ROM region must be found first in
+    // find_range(); insert them at the front of the address map
+    if (shadows_rom)
+        this->address_map.insert(this->address_map.begin(), entry);
+    else
+        this->address_map.push_back(entry);
 
     LOG_F(INFO, "Added mmio region 0x%X..0x%X%s%s%s",
         start_addr, end,

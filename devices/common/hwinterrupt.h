@@ -94,6 +94,11 @@ enum IntSrc : uint32_t {
     SLOT_VDS,
     VBL,
     VALKYRIE,
+    PCI_WIRELESS,
+    USB_KL0,
+    USB_KL1,
+    USB_KL2,
+    NEC_USB,
 };
 
 /** Base class for interrupt controllers. */

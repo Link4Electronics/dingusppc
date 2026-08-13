@@ -68,6 +68,27 @@ void NVram::write_byte(uint32_t offset, uint8_t val) {
     this->storage[offset] = val;
 }
 
+/* MMIO access to the NVRAM (New World: memory-mapped at 0xFFF04000).
+   Reads/writes assemble big-endian words from the byte storage. */
+uint32_t NVram::read(uint32_t rgn_start, uint32_t offset, int size) {
+    uint32_t result = 0;
+    for (int i = 0; i < size; i++) {
+        result <<= 8;
+        if (offset + i < this->ram_size)
+            result |= this->storage[offset + i];
+        else
+            result |= 0xFF;
+    }
+    return result;
+}
+
+void NVram::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int size) {
+    for (int i = size - 1; i >= 0; i--) {
+        if (offset + i < this->ram_size)
+            this->storage[offset + i] = (value >> (8 * (size - 1 - i))) & 0xFF;
+    }
+}
+
 void NVram::init() {
     char sig[sizeof(NVRAM_FILE_ID)];
     uint16_t data_size;
