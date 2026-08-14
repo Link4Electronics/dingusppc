@@ -45,6 +45,23 @@ static int ctz32(uint32_t val) {
     return n;
 }
 
+/* Serial presence detect (SPD) data of the 512 MB DIMM in a Mac mini G4
+   (PowerMac10,2), byte-for-byte from the device tree's
+   /proc/device-tree/memory@0/dimm-info. The DIMM is a DDR SDRAM (type 7,
+   byte 2), 13 rows / 11 cols / 4 banks, i.e. the (0x0D, 0x0B, 0x04) triple
+   the boot ROM's memory-training table scan expects (0xfff883d8, "0xD0"
+   version table). */
+static const uint8_t spd_dimm_info[128] = {
+    0x80, 0x08, 0x07, 0x0d, 0x0b, 0x02, 0x40, 0x00, 0x04, 0x50, 0x70, 0x00, 0x82, 0x08, 0x00, 0x01,
+    0x0e, 0x04, 0x1c, 0x01, 0x02, 0x20, 0x00, 0x60, 0x70, 0x75, 0x70, 0x3c, 0x28, 0x3c, 0x28, 0x80,
+    0x60, 0x60, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x37, 0x46, 0x28, 0x28, 0x50, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0xf3, 0x7f, 0x7f,
+    0x7f, 0x7f, 0x7f, 0xe3, 0x00, 0x00, 0x00, 0x35, 0x31, 0x35, 0x31, 0x32, 0x36, 0x32, 0x31, 0x35,
+    0x35, 0x38, 0x31, 0x34, 0x34, 0x32, 0x30, 0x30, 0x30, 0x41, 0x00, 0x09, 0x06, 0xf1, 0xfb, 0x08,
+    0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
 IntrepidPciHostDevice::IntrepidPciHostDevice(std::string name, int dev_id)
     : PCIDevice(name)
 {
@@ -262,6 +279,11 @@ uint32_t Intrepid::read_unin_register(uint32_t offset, int size)
     case UNI_N_VERSION:
         // Intrepid revision 0x00D2, as found in the Mac mini G4
         return 0x00D2;
+    case UNI_N_VERSION + 3:
+        // The boot ROM reads the version as a byte at offset 3, which is
+        // big-endian lane 3 of the word at offset 0 (memory probe 0xfff88cac,
+        // table scan 0xfff883e4, I2C bus select 0xfff8b4e8).
+        return 0xD2;
     case UNI_N_CLOCK_CNTL:
         return this->clock_cntl;
     case UNI_N_POWER_MGT:
@@ -309,10 +331,11 @@ void Intrepid::write_unin_register(uint32_t offset, uint32_t value, int size)
 
    The boot ROM's I2C byte routines (0xfff8b51c read / 0xfff8b5b4 write /
    0xfff8b8d0 reset) poll the STATUS register and abort to an error path
-   when STATUS_ACK bit 1 is clear. No devices are attached to this bus, so
-   report every transfer as completed and acknowledged: STATUS reads return
-   all four "phase done" bits (0x0F) and STATUS_ACK reads return bit 1 (0x02),
-   which lets every "wait until bit set" poll exit immediately. */
+   when STATUS_ACK bit 1 is clear. STATUS reads return all four "phase done"
+   bits (0x0F) and STATUS_ACK reads return bit 1 (0x02), which lets every
+   "wait until bit set" poll exit immediately. The only device attached is
+   the DIMM SPD EEPROM at 7-bit address 0x50 (0xA0/0xA1); its content is
+   served from the data register on reads. */
 uint32_t Intrepid::read_i2c_register(uint32_t offset, int size)
 {
     switch (offset) {
@@ -331,6 +354,12 @@ uint32_t Intrepid::read_i2c_register(uint32_t offset, int size)
     case UNI_N_I2C_SUBADDR:
         return this->i2c_subaddr;
     case UNI_N_I2C_DATA:
+        // The DIMM's SPD EEPROM sits at 7-bit address 0x50 (8-bit write
+        // address 0xA0, read address 0xA1) on this bus. A data read after
+        // the boot ROM's read transfer (0xfff8b51c) returns the selected
+        // SPD byte.
+        if ((this->i2c_addr & 0xFE) == 0xA0 && this->i2c_subaddr < 0x80)
+            return spd_dimm_info[this->i2c_subaddr];
         return this->i2c_data;
     case UNI_N_I2C_SSADDR:
         return this->i2c_ssaddr;
