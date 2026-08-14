@@ -135,17 +135,24 @@ static const PropMap q88_settings = {
     {"pci_USB4",
         new StrProperty("")},
     {"pci_ATA",
-        new StrProperty("")},
+        new StrProperty("IntrepidAta")},
     {"pci_FireWire",
         new StrProperty("")},
     {"pci_GMAC",
         new StrProperty("")},
+    {"hdd_config",
+        new StrProperty("Ide0:0")},
+    {"cdr_config",
+        new StrProperty("Ide0:1")},
 };
 
 static std::vector<std::string> q88_devices = {
     "Intrepid",
     "KeyLargo",
     "NVRAM",
+    "Ide0",
+    "AtaHardDisk",
+    "AtapiCdrom",
 };
 
 static const DeviceDescription MachineQ88_descriptor = {

@@ -246,7 +246,7 @@ void Intrepid::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
         return;
 
     case UNI_N_INTERNAL_CONFIG_DATA:
-        this->config_write(UNI_N_WINDOW_INTERNAL, offset, size, value);
+        this->config_write(UNI_N_WINDOW_INTERNAL, offset, value, size);
         return;
 
     default:
