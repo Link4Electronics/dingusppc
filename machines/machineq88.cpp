@@ -85,7 +85,8 @@ int MachineQ88::initialize(const std::string &id) {
         return -1;
     }
 
-    // allocate RAM
+    // allocate RAM (DT memory@0: 1 GiB, reg 0x00000000 0x40000000; the top of
+    // RAM at 0x40000000 is used by the ROM as scratch during boot)
     intrepid_obj->setup_ram(GET_INT_PROP("rambank0_size"));
 
     // register NVRAM (nvram@fff04000, 8 KB, shadows the ROM window) as an
@@ -97,14 +98,12 @@ int MachineQ88::initialize(const std::string &id) {
     }
     intrepid_obj->add_mmio_region(0xFFF04000, 0x2000, nvram);
 
-    // configure CPU clocks (PowerMac10,2: 1.5 GHz core, 166 MHz bus)
-    // NOTE: ROM delay() assumes timebase = r24 = 0x13A00008 = 329252872 Hz
-    // (set at fff03020, not recalibrated for our 41.67 MHz TB), so delays run
-    // 8x over their intended duration with the real timebase. Use the ROM's
-    // assumed TB so delay(x) == x milliseconds, matching real-hardware timing.
+    // configure CPU clocks (PowerMac10,2: 1.5 GHz core, 166 MHz bus, 41.67 MHz
+    // timebase). The ROM calibrates its own values (bus/timebase) from the
+    // mac-io timer@15000 counter, and delay() uses them directly.
     uint64_t core_freq     = 1500000000ULL;
     uint64_t bus_freq      = 166000000ULL;
-    uint64_t timebase_freq = 329252872ULL;
+    uint64_t timebase_freq = 41666666ULL;
 
     // initialize virtual CPU and request a G4 (MPC7447A) CPU
     ppc_cpu_init(intrepid_obj, {
@@ -119,7 +118,7 @@ int MachineQ88::initialize(const std::string &id) {
 
 static const PropMap q88_settings = {
     {"rambank0_size",
-        new IntProperty(512, std::vector<uint32_t>({128, 256, 512, 1024}))},
+        new IntProperty(1024, std::vector<uint32_t>({128, 256, 512, 1024}))},
     {"pci_AGP_GPU",
         new StrProperty("AtiRadeonRV280")},
     {"pci_KeyLargo",
