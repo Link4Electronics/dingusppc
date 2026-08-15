@@ -1583,22 +1583,32 @@ void dppc_interpreter::ppc_icbi(uint32_t opcode) {
 }
 
 void dppc_interpreter::ppc_dcbf(uint32_t opcode) {
-    /* placeholder */
+    ppc_grab_regsab(opcode);
+    uint32_t ea = ppc_result_b + (reg_a ? ppc_result_a : 0);
+
+    mmu_dcbf(opcode, ea);
 }
 
 void dppc_interpreter::ppc_dcbi(uint32_t opcode) {
 #ifdef CPU_PROFILING
     num_supervisor_instrs++;
 #endif
-    /* placeholder */
     if (ppc_state.msr & MSR::PR) {
         ppc_exception_handler(Except_Type::EXC_PROGRAM, Exc_Cause::NOT_ALLOWED);
         return;
     }
+    ppc_grab_regsab(opcode);
+    uint32_t ea = ppc_result_b + (reg_a ? ppc_result_a : 0);
+
+    mmu_dcbi(opcode, ea);
 }
 
 void dppc_interpreter::ppc_dcbst(uint32_t opcode) {
-    /* placeholder */
+    // Data Cache Block Store: like dcbf, write back the dirty line.
+    ppc_grab_regsab(opcode);
+    uint32_t ea = ppc_result_b + (reg_a ? ppc_result_a : 0);
+
+    mmu_dcbf(opcode, ea);
 }
 
 void dppc_interpreter::ppc_dcbt(uint32_t opcode) {

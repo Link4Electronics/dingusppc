@@ -783,12 +783,11 @@ static TLBEntry* dtlb2_refill(uint32_t guest_va, int is_write, bool is_dbg = fal
             tlb_entry->flags = flags | TLBFlags::PAGE_MEM;
             tlb_entry->host_va_offs_r = (int64_t)rgn_desc->mem_ptr - guest_va +
                                         (phys_addr - rgn_desc->start);
-            if (rgn_desc->type == RT_ROM) {
-                // redirect writes to the dummy page for ROM regions
-                tlb_entry->host_va_offs_w = (int64_t)&dummy_page - tag;
-            } else {
-                tlb_entry->host_va_offs_w = tlb_entry->host_va_offs_r;
-            }
+            // ROM/flash regions are writable (write-through flash / RAM-backed
+            // BootROM window); the boot ROM's bus-speed measurement at 0xfff03b30
+            // relies on a scratch double at VA 0x40000000 (DBAT3 -> PA 0xFFF00000)
+            // being writable. The real mini's BootROM region accepts writes.
+            tlb_entry->host_va_offs_w = tlb_entry->host_va_offs_r;
         }
         tlb_entry->phys_tag = phys_addr & ~0xFFFUL;
         tlb_entry->pat_generation = gTLBPatGeneration;
@@ -909,6 +908,53 @@ void mmu_dcbz(uint32_t opcode, uint32_t guest_va)
     mmu_write_vmem<uint64_t>(opcode, guest_va +  8, 0);
     mmu_write_vmem<uint64_t>(opcode, guest_va + 16, 0);
     mmu_write_vmem<uint64_t>(opcode, guest_va + 24, 0);
+}
+
+// translate the guest address and invoke the given cache-block operation on
+// the backing ROM region
+template <bool is_commit>
+static void mmu_dcache_block(uint32_t opcode, uint32_t guest_va)
+{
+    const uint32_t tag = guest_va & ~0xFFFUL;
+    // look up guest virtual address in the primary TLB
+    TLBEntry *tlb_entry = &pCurDTLB1[(guest_va >> PPC_PAGE_SIZE_BITS) & tlb_size_mask];
+
+    if (!tlb_entry->matches_tag(tag)) {
+        // primary TLB miss -> look up address in the secondary TLB
+        tlb_entry = lookup_secondary_tlb<TLBType::DTLB>(guest_va, tag);
+        if (tlb_entry == nullptr) {
+            // secondary TLB miss ->
+            // perform full address translation and refill the secondary TLB
+            tlb_entry = dtlb2_refill(guest_va, 1);
+        }
+    }
+
+    if (!(tlb_entry->flags & TLBFlags::PAGE_MEM))
+        return;
+
+    const uint32_t phys_addr = tlb_entry->phys_tag | (guest_va & 0xFFF);
+    if (is_commit)
+        mem_ctrl_instance->cache_block_commit(phys_addr);
+    else
+        mem_ctrl_instance->cache_block_invalidate(phys_addr);
+}
+
+void mmu_dcbi(uint32_t opcode, uint32_t guest_va)
+{
+    // Data Cache Block Invalidate: discard the dirty cache line without a
+    // write-back. The emulator has no data cache, so the stores that preceded
+    // the dcbi went straight to host memory; restore the line from the
+    // committed copy so "cache-scratchpad" code (e.g. the ROM's bus-speed
+    // measurement at 0xfff03bac, with a dcbz/stw/lfd scratch double at VA
+    // 0x40000000 -> PA 0xFFF00000) does not corrupt the flash / reset vector.
+    mmu_dcache_block<false>(opcode, guest_va);
+}
+
+void mmu_dcbf(uint32_t opcode, uint32_t guest_va)
+{
+    // Data Cache Block Flush: write back the dirty line, i.e. commit the
+    // current content so a later dcbi keeps it.
+    mmu_dcache_block<true>(opcode, guest_va);
 }
 
 uint8_t *mmu_translate_imem(uint32_t vaddr, uint32_t *paddr)

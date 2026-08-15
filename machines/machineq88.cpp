@@ -85,8 +85,7 @@ int MachineQ88::initialize(const std::string &id) {
         return -1;
     }
 
-    // allocate RAM (DT memory@0: 1 GiB, reg 0x00000000 0x40000000; the top of
-    // RAM at 0x40000000 is used by the ROM as scratch during boot)
+    // allocate RAM (DT memory@0: 1 GiB, reg 0x00000000 0x40000000)
     intrepid_obj->setup_ram(GET_INT_PROP("rambank0_size"));
 
     // register NVRAM (nvram@fff04000, 8 KB, shadows the ROM window) as an

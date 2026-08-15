@@ -39,6 +39,13 @@ MemCtrlBase::~MemCtrlBase() {
             delete (reg);
     }
     this->mem_regions.clear();
+
+    for (auto& reg : rom_committed_copies) {
+        if (reg)
+            delete (reg);
+    }
+    this->rom_committed_copies.clear();
+
     this->address_map.clear();
 }
 
@@ -221,6 +228,14 @@ AddressMapEntry* MemCtrlBase::add_mem_region(uint32_t start_addr, uint32_t size,
     entry->devobj  = nullptr;
     entry->mem_ptr = mem_ptr;
 
+    // Keep a clean copy of ROM regions for the dcbi/dcbf data-cache
+    // instructions (see the rom_committed_ptr comment).
+    entry->rom_committed_ptr = nullptr;
+    if (type & RT_ROM) {
+        entry->rom_committed_ptr = new uint8_t[size](); // allocate and clear
+        this->rom_committed_copies.push_back(entry->rom_committed_ptr);
+    }
+
     // Keep address_map sorted, that way the RAM region (which starts at 0 and
     // is most often requested) will be found by find_range on the first
     // iteration.
@@ -288,6 +303,9 @@ AddressMapEntry* MemCtrlBase::add_mem_mirror_common(uint32_t start_addr, uint32_
     entry->type    = ref_entry->type | RT_MIRROR;
     entry->devobj  = nullptr;
     entry->mem_ptr = ref_entry->mem_ptr + offset;
+    // mirrors of ROM regions share the origin's committed copy
+    entry->rom_committed_ptr = ref_entry->rom_committed_ptr ?
+        ref_entry->rom_committed_ptr + offset : nullptr;
 
     this->address_map.push_back(entry);
 
@@ -333,6 +351,11 @@ AddressMapEntry* MemCtrlBase::set_data(uint32_t load_addr, const uint8_t* data, 
     cpy_size = std::min(ref_entry->end - ref_entry->start + 1, size);
     memcpy(ref_entry->mem_ptr + load_offset, data, cpy_size);
 
+    // keep the committed (pristine) copy of ROM content in sync, so a later
+    // dcbi can restore the flash from it (see cache_block_invalidate)
+    if (ref_entry->rom_committed_ptr)
+        memcpy(ref_entry->rom_committed_ptr + load_offset, data, cpy_size);
+
     return ref_entry;
 }
 
@@ -365,6 +388,7 @@ AddressMapEntry* MemCtrlBase::add_mmio_region(uint32_t start_addr, uint32_t size
     entry->type    = RT_MMIO;
     entry->devobj  = dev_instance;
     entry->mem_ptr = 0;
+    entry->rom_committed_ptr = nullptr;
 
     // MMIO regions that shadow a ROM region must be found first in
     // find_range(); insert them at the front of the address map
@@ -482,6 +506,47 @@ uint8_t *MemCtrlBase::get_region_hostmem_ptr(const uint32_t addr) {
         return (addr - reg_desc->mirror) + reg_desc->mem_ptr;
     else
         return (addr - reg_desc->start) + reg_desc->mem_ptr;
+}
+
+
+// shared implementation of the dcbi/dcbf data-cache block operations for
+// ROM-backed regions
+static void cache_block_op(AddressMapEntry* entry, uint32_t phys_addr, bool commit)
+{
+    if (!entry || !entry->rom_committed_ptr)
+        return;
+
+    const uint32_t line = phys_addr & ~(MemCtrlBase::CACHE_LINE_SIZE - 1);
+    if (line < entry->start)
+        return;
+
+    const uint64_t offset = (uint64_t)(line - entry->start);
+    const uint64_t size   = (uint64_t)(entry->end - entry->start) + 1;
+    if (offset + MemCtrlBase::CACHE_LINE_SIZE > size)
+        return;
+
+    if (commit) {
+        // dcbf/dcbst: write-back the dirty line, i.e. commit current content
+        memcpy(entry->rom_committed_ptr + offset, entry->mem_ptr + offset,
+               MemCtrlBase::CACHE_LINE_SIZE);
+    } else {
+        // dcbi: discard the dirty line without write-back, i.e. restore the
+        // line from the committed copy
+        memcpy(entry->mem_ptr + offset, entry->rom_committed_ptr + offset,
+               MemCtrlBase::CACHE_LINE_SIZE);
+    }
+}
+
+
+void MemCtrlBase::cache_block_commit(uint32_t phys_addr)
+{
+    cache_block_op(find_range(phys_addr), phys_addr, true);
+}
+
+
+void MemCtrlBase::cache_block_invalidate(uint32_t phys_addr)
+{
+    cache_block_op(find_range(phys_addr), phys_addr, false);
 }
 
 

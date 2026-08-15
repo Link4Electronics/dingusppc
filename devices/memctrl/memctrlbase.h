@@ -59,6 +59,16 @@ typedef struct AddressMapEntry {
     uint32_t type;          // range type
     MMIODevice* devobj;     // pointer to device object
     unsigned char* mem_ptr; // direct pointer to data for memory objects
+    // "Clean" copy of a ROM region, used to emulate write-back cache semantics
+    // for the data cache block instructions (dcbi/dcbf/dcbst):
+    //  - initially a pristine copy of the loaded ROM (see set_data)
+    //  - dcbf/dcbst commit the current line content into it (write-back)
+    //  - dcbi restores the line from it (invalidate-without-write-back)
+    // The boot ROM relies on this to use a cache line as scratch space (dcbz +
+    // stw + lfd at 0xfff03bac, then dcbi at 0xfff03bf8 discards the dirty line
+    // so the flash/reset vector is never really written). For mirrors this
+    // points into the origin region's buffer.
+    unsigned char* rom_committed_ptr;
 } AddressMapEntry;
 
 
@@ -104,6 +114,16 @@ public:
 
     void dump_regions();
 
+    // Data cache block operations, used by the PPC dcbi/dcbf/dcbst
+    // instructions. Only ROM-backed regions are affected: cache block
+    // invalidation (dcbi) restores the target line from the committed copy so
+    // that "cache-scratchpad" stores made before a dcbi do not corrupt the
+    // flash; dcbf/dcbst commit the current line into the committed copy
+    // (write-back), so writes that were explicitly flushed persist.
+    static constexpr uint32_t CACHE_LINE_SIZE = 32;
+    void cache_block_commit(uint32_t phys_addr);
+    void cache_block_invalidate(uint32_t phys_addr);
+
 protected:
     AddressMapEntry* add_mem_region(
         uint32_t start_addr, uint32_t size, uint32_t dest_addr, uint32_t type,
@@ -115,6 +135,7 @@ protected:
 
 private:
     std::vector<uint8_t*> mem_regions;
+    std::vector<uint8_t*> rom_committed_copies;
     std::vector<AddressMapEntry*> address_map;
 };
 
