@@ -85,6 +85,13 @@ int MachineQ88::initialize(const std::string &id) {
         return -1;
     }
 
+    // map the "rom" region (DT node rom@ff800000, ranges 0xFF800000 size
+    // 0x800000, with boot-rom@fff00000 as the flash sub-node) as writable RAM
+    // below the flash. Open Firmware relocates its image and builds its
+    // control block (0xFF844C00) here on the real machine; without this the
+    // ROM-side code branches into unmapped memory and faults.
+    intrepid_obj->add_ram_region(0xFF800000, 0x700000);
+
     // allocate RAM (DT memory@0: 1 GiB, reg 0x00000000 0x40000000)
     intrepid_obj->setup_ram(GET_INT_PROP("rambank0_size"));
 
