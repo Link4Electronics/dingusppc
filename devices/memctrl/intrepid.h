@@ -221,6 +221,13 @@ private:
     // the boot ROM's clock setup (0xfff888c0) and DRAM timing code.
     uint32_t clk_reg = 0;
 
+    // Per-bank memory config bytes read by the boot ROM's RAM-size probe
+    // (0xfff88568) at 0xF80021C0 + bank*32: byte 0 at +0, byte 0x10 at +0x10.
+    // byte 0x10's low 6 bits mark the bank present; its top nibble together
+    // with byte 0's bit 0 select the DDR timing entry from the ROM's table.
+    // Bank 0 = the installed 512 MB DDR DIMM, banks 1-7 empty.
+    uint8_t mem_bank_cfg[8][2] = {};
+
     // Descriptor table pointer last written to each config window base
     // (0x80008000 and 0x80008800); used to dedupe the INFO log.
     uint32_t config_window_ptr[2] = {};

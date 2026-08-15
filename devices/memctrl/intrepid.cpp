@@ -105,6 +105,10 @@ Intrepid::Intrepid() : MemCtrlBase(), PCIDevice("Intrepid"), PCIHost()
     this->cache_ln_sz = 8;
     this->lat_timer   = 0x10;
 
+    // bank 0 = 512 MB DDR DIMM: byte 0x10 = 0x41 marks the bank present and
+    // selects DDR table entry 4 (0x0d08041a, the "0x0d" = 512 MB size class).
+    this->mem_bank_cfg[0][1] = 0x41;
+
     // add memory mapped I/O region for the UniNorth control registers
     this->add_mmio_region(UNI_N_REGISTER_BLOCK, 0x1000, this);
 
@@ -424,6 +428,21 @@ void Intrepid::write_i2c_register(uint32_t offset, uint32_t value, int size)
    from the ROM's point of view. */
 uint32_t Intrepid::read_clk_register(uint32_t offset, int size)
 {
+    // Per-bank memory config bytes at 0xF80021C0 + bank*32 (0x1C0-0x2BF),
+    // read by the boot ROM's RAM-size probe (0xfff88568) as two bytes per
+    // bank at +0 and +0x10. A bank reads 0 when empty.
+    if (offset >= UNI_N_CLK_SUN && offset < UNI_N_CLK_SUN + 8 * 0x20) {
+        uint32_t bank = (offset - UNI_N_CLK_SUN) / 0x20;
+        switch (offset & 0x1F) {
+        case 0x00:
+            return this->mem_bank_cfg[bank][0];
+        case 0x10:
+            return this->mem_bank_cfg[bank][1];
+        default:
+            return 0;
+        }
+    }
+
     if (offset == UNI_N_CLK_REG) {
         if (size == 1)
             return (this->clk_reg >> 24) & 0xFF; // big-endian byte lane 0
@@ -434,6 +453,20 @@ uint32_t Intrepid::read_clk_register(uint32_t offset, int size)
 
 void Intrepid::write_clk_register(uint32_t offset, uint32_t value, int size)
 {
+    // Store writes to the per-bank memory config bytes too; the boot ROM
+    // programs the SUN I2C mode bytes here later in boot.
+    if (offset >= UNI_N_CLK_SUN && offset < UNI_N_CLK_SUN + 8 * 0x20) {
+        uint32_t bank = (offset - UNI_N_CLK_SUN) / 0x20;
+        switch (offset & 0x1F) {
+        case 0x00:
+        case 0x10:
+            this->mem_bank_cfg[bank][(offset & 0x1F) >> 4] = value & 0xFF;
+            return;
+        default:
+            break;
+        }
+    }
+
     if (offset == UNI_N_CLK_REG) {
         if (size == 1)
             this->clk_reg = (this->clk_reg & 0x00FFFFFF) |
