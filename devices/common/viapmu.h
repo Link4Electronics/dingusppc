@@ -29,6 +29,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <devices/common/hwcomponent.h>
 #include <devices/common/hwinterrupt.h>
 
+#include <chrono>
 #include <cinttypes>
 #include <string>
 
@@ -85,6 +86,9 @@ private:
     void pmu_update_extirq();
     void one_sec_tick();
 
+    uint32_t calc_rtc();
+    void set_rtc(uint32_t value);
+
     // VIA registers (raw, no port-direction gating of the PMU handshake)
     uint8_t via_portb = 0;
     uint8_t via_porta = 0;
@@ -111,6 +115,14 @@ private:
     // PMU state
     uint8_t intbits = 0;
     uint8_t intmask = 0;
+
+    // PMU RTC: 32-bit seconds since 1904-01-01 00:00 (classic Mac clock).
+    // rtc_tick_offset is the RTC value at the instant rtc_base.
+    uint32_t rtc_tick_offset = 0;
+    std::chrono::time_point<std::chrono::system_clock> rtc_base;
+
+    // 20-byte PMU PRAM (kPMUpramRead/Write). Bytes 8-11 are the live RTC.
+    uint8_t pram[20] = {};
 
     // PMU interrupt line (OpenPIC via-pmu source) and 1-second tick timer
     InterruptCtrl* int_ctrl = nullptr;

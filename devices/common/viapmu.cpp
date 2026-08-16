@@ -38,6 +38,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <chrono>
 #include <cinttypes>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -116,6 +117,38 @@ ViaPmu::ViaPmu() : HWComponent() {
     this->intbits = 0;
     this->intmask = 0;
     this->one_sec_timer_id = 0;
+
+    // Initialize the PMU RTC (seconds since 1904-01-01 00:00 local, the
+    // classic Mac clock). Deterministic mode freezes it at a fixed date.
+    std::tm epoch_tm = {
+        .tm_sec  = 0,
+        .tm_min  = 0,
+        .tm_hour = 0,
+        .tm_mday = 1,
+        .tm_mon  = 1 - 1,
+        .tm_year = 1904 - 1900,
+        .tm_isdst = 0
+    };
+    auto mac_epoch = std::chrono::system_clock::from_time_t(std::mktime(&epoch_tm));
+    if (is_deterministic) {
+        // March 24, 2001 was the public release date of Mac OS X.
+        std::tm fixed_tm = {
+            .tm_sec  = 0,
+            .tm_min  = 0,
+            .tm_hour = 12,
+            .tm_mday = 24,
+            .tm_mon  = 3 - 1,
+            .tm_year = 2001 - 1900,
+            .tm_isdst = 0
+        };
+        this->rtc_base = std::chrono::system_clock::now();
+        this->rtc_tick_offset = (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::from_time_t(std::mktime(&fixed_tm)) - mac_epoch).count();
+    } else {
+        this->rtc_base = std::chrono::system_clock::now();
+        this->rtc_tick_offset = (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(
+            this->rtc_base - mac_epoch).count();
+    }
 }
 
 ViaPmu::~ViaPmu()
@@ -255,6 +288,20 @@ void ViaPmu::set_sr_int()
     this->via_ifr |= VIA_IF_SR;
 }
 
+uint32_t ViaPmu::calc_rtc()
+{
+    if (is_deterministic)
+        return this->rtc_tick_offset;
+    auto elapsed = std::chrono::system_clock::now() - this->rtc_base;
+    return this->rtc_tick_offset + (uint32_t)std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+}
+
+void ViaPmu::set_rtc(uint32_t value)
+{
+    this->rtc_base = std::chrono::system_clock::now();
+    this->rtc_tick_offset = value;
+}
+
 void ViaPmu::pmu_update()
 {
     // Handshake: B bit 4 = TREQ (driven by the CPU), bit 3 = TACK (PMU).
@@ -350,19 +397,38 @@ void ViaPmu::dispatch_cmd()
     case 0x20: // PMU_ADB_CMD
         LOG_F(9, "PMU_ADB_CMD, no ADB devices present");
         break;
-    case 0x30: // PMU_SET_RTC
-        LOG_F(INFO, "PMU_SET_RTC");
+    case 0x30: { // PMU_SET_RTC
+        uint32_t ti = ((uint32_t)this->cmd_buf[0] << 24) |
+                      ((uint32_t)this->cmd_buf[1] << 16) |
+                      ((uint32_t)this->cmd_buf[2] << 8) |
+                       (uint32_t)this->cmd_buf[3];
+        this->set_rtc(ti);
+        LOG_F(INFO, "PMU_SET_RTC -> %u", ti);
+        break;
+    }
+    case 0x31: // PMU_WRITE_PRAM (20 bytes)
+        memcpy(this->pram, this->cmd_buf, sizeof(this->pram));
         break;
     case 0x38: { // PMU_READ_RTC
-        std::chrono::time_point<std::chrono::system_clock> end = std::chrono::system_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            end - std::chrono::system_clock::from_time_t(0));
-        uint32_t mac_time = uint32_t(elapsed.count()) + 2082844800ULL; // seconds since 1904-01-01
-        this->cmd_rsp[0] = (mac_time >> 24) & 0xFF;
-        this->cmd_rsp[1] = (mac_time >> 16) & 0xFF;
-        this->cmd_rsp[2] = (mac_time >>  8) & 0xFF;
-        this->cmd_rsp[3] =  mac_time        & 0xFF;
+        uint32_t ti = this->calc_rtc();
+        this->cmd_rsp[0] = (ti >> 24) & 0xFF;
+        this->cmd_rsp[1] = (ti >> 16) & 0xFF;
+        this->cmd_rsp[2] = (ti >>  8) & 0xFF;
+        this->cmd_rsp[3] =  ti        & 0xFF;
         this->cmd_rsp_sz = 4;
+        LOG_F(INFO, "PMU_READ_RTC -> %u", ti);
+        break;
+    }
+    case 0x39: { // PMU_READ_PRAM (original 20 bytes)
+        // The stored PRAM is returned with bytes 8-11 refreshed from the
+        // live RTC (classic Mac PRAM layout: seconds since 1904 there).
+        memcpy(this->cmd_rsp, this->pram, sizeof(this->pram));
+        uint32_t ti = this->calc_rtc();
+        this->cmd_rsp[8] = (ti >> 24) & 0xFF;
+        this->cmd_rsp[9] = (ti >> 16) & 0xFF;
+        this->cmd_rsp[10] = (ti >>  8) & 0xFF;
+        this->cmd_rsp[11] =  ti        & 0xFF;
+        this->cmd_rsp_sz = 20;
         break;
     }
     case 0x70: // PMU_SET_INTR_MASK
@@ -377,10 +443,20 @@ void ViaPmu::dispatch_cmd()
         LOG_F(INFO, "PMU_INT_ACK -> 0x%02X", this->cmd_rsp[0]);
         this->pmu_update_extirq();
         break;
-    case 0x7e: // PMU_SHUTDOWN
+    case 0x7e: { // PMU_SHUTDOWN
+        this->cmd_rsp[0] = 0;
+        this->cmd_rsp_sz = 1;
+        // The real PMU99 only powers off with the "MATT" signature.
+        if (this->cmd_buf[0] != 'M' || this->cmd_buf[1] != 'A' ||
+            this->cmd_buf[2] != 'T' || this->cmd_buf[3] != 'T') {
+            LOG_F(ERROR, "PMU_SHUTDOWN: bad signature %02X %02X %02X %02X",
+                  this->cmd_buf[0], this->cmd_buf[1], this->cmd_buf[2], this->cmd_buf[3]);
+            break;
+        }
         LOG_F(INFO, "PMU_SHUTDOWN: powering off");
         power_off(po_shut_down);
         break;
+    }
     case 0x8f: // PMU_POWER_EVENTS
         // QEMU macio/pmu.c: GET powerup/wakeup event registers report no
         // events; SET/CLR are accepted but do nothing.
@@ -443,6 +519,14 @@ void ViaPmu::dispatch_cmd()
         break;
     default:
         LOG_F(WARNING, "Unsupported PMU command 0x%02X", this->cmd);
+        // Manufacture a zero-filled fake response of the expected length so
+        // the command state machine completes (QEMU macio/pmu.c does the
+        // same). Commands with a fixed response length would otherwise wedge
+        // the PMU in the "rsp" state forever.
+        if (this->rsplen > 0 && this->rsplen <= PMU_RSP_BUF_SIZE) {
+            memset(this->cmd_rsp, 0, this->rsplen);
+            this->cmd_rsp_sz = this->rsplen;
+        }
         break;
     }
 }
