@@ -23,6 +23,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define MEMORY_CONTROLLER_BASE_H
 
 #include <cinttypes>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,8 @@ typedef struct AddressMapEntry {
     uint32_t mirror;        // starting address of the origin for RT_MIRROR
     uint32_t type;          // range type
     MMIODevice* devobj;     // pointer to device object
+    std::function<uint32_t(uint32_t rgn_start, uint32_t offset, int size)> read;
+    std::function<void(uint32_t rgn_start, uint32_t offset, uint32_t value, int size)> write;
     unsigned char* mem_ptr; // direct pointer to data for memory objects
     unsigned char* rom_committed_ptr;
 } AddressMapEntry;
@@ -68,7 +71,8 @@ class MemCtrlBase {
 public:
     MemCtrlBase() = default;
     virtual ~MemCtrlBase();
-    virtual AddressMapEntry* add_rom_region(uint32_t start_addr, uint32_t size);
+    virtual AddressMapEntry* add_rom_region(uint32_t start_addr, uint32_t size,
+                                            MMIODevice* dev_instance = nullptr);
     virtual AddressMapEntry* add_ram_region(uint32_t start_addr, uint32_t size);
     virtual AddressMapEntry* add_ram_region(uint32_t start_addr, uint32_t size,
                                             uint8_t *mem_ptr);
@@ -112,7 +116,8 @@ public:
 protected:
     AddressMapEntry* add_mem_region(
         uint32_t start_addr, uint32_t size, uint32_t dest_addr, uint32_t type,
-        uint8_t  *mem_ptr
+        uint8_t  *mem_ptr = nullptr, MMIODevice* dev_instance = nullptr,
+        uint32_t offset = 0
     );
 
     AddressMapEntry* add_mem_mirror_common(uint32_t start_addr, uint32_t dest_addr,

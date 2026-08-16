@@ -24,11 +24,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <cpu/ppc/ppcemu.h>
 #include <devices/common/nvram.h>
 #include <devices/deviceregistry.h>
+#include <devices/memctrl/bootrom.h>
 #include <devices/memctrl/intrepid.h>
 #include <machines/machine.h>
 #include <machines/machinebase.h>
 #include <machines/machinefactory.h>
 #include <machines/machineproperties.h>
+
+#include <memory>
 
 // UniNorth AGP bus IRQ mapping. IntSrc values map to OpenPIC source numbers
 // (see OpenPic::source_number_for_intsrc): GPU = 48.
@@ -79,8 +82,21 @@ int MachineQ88::initialize(const std::string &id) {
     }
     intrepid_obj->pci_register_device(DEV_FUN(0x17,0), keylargo);
 
-    // allocate ROM region (New World: 1 MB at 0xFFF00000)
-    if (!intrepid_obj->add_rom_region(0xFFF00000, 0x100000)) {
+    // allocate ROM region with flash chip emulation (New World: 1 MB at 0xFFF00000)
+    BootRomNW* bootrom = dynamic_cast<BootRomNW*>(gMachineObj->get_comp_by_name("BootRomNW"));
+    if (!bootrom) {
+        LOG_F(ERROR, "BootRomNW device not found!");
+        return -1;
+    }
+
+    // create and attach the Sharp LH28F008BJT flash chip
+    auto flash_chip = std::make_unique<SharpLH28F008BJT>();
+    flash_chip->set_controller(bootrom);
+    bootrom->flash_chip = flash_chip.release();
+
+    // register the boot ROM as the ROM region device
+    bootrom->rom_entry = intrepid_obj->add_rom_region(0xFFF00000, 0x100000, bootrom);
+    if (!bootrom->rom_entry) {
         LOG_F(ERROR, "Could not allocate ROM region!");
         return -1;
     }
@@ -95,14 +111,9 @@ int MachineQ88::initialize(const std::string &id) {
     // allocate RAM (DT memory@0: 1 GiB, reg 0x00000000 0x40000000)
     intrepid_obj->setup_ram(GET_INT_PROP("rambank0_size"));
 
-    // register NVRAM (nvram@fff04000, 8 KB, shadows the ROM window) as an
-    // MMIO region; MemCtrlBase gives it precedence over the ROM region
-    NVram* nvram = dynamic_cast<NVram*>(gMachineObj->get_comp_by_name("NVRAM"));
-    if (!nvram) {
-        LOG_F(ERROR, "NVRAM device not found!");
-        return -1;
-    }
-    intrepid_obj->add_mmio_region(0xFFF04000, 0x2000, nvram);
+    // Note: NVRAM is now part of the flash chip (addresses 0x4000-0x5FFF and
+    // 0x6000-0x7FFF within the 1MB flash). The NVRAM device is kept for file
+    // persistence but not registered as MMIO.
 
     // configure CPU clocks (PowerMac10,2: 1.5 GHz core, 166 MHz bus, 41.67 MHz
     // timebase). The ROM calibrates its own values (bus/timebase) from the
@@ -156,6 +167,7 @@ static const PropMap q88_settings = {
 static std::vector<std::string> q88_devices = {
     "Intrepid",
     "KeyLargo",
+    "BootRomNW",
     "NVRAM",
     "Ide0",
     "AtaHardDisk",

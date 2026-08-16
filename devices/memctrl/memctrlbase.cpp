@@ -205,17 +205,39 @@ bool MemCtrlBase::is_range_free(uint32_t addr, uint32_t size, bool allow_rom_sha
 
 AddressMapEntry* MemCtrlBase::add_mem_region(uint32_t start_addr, uint32_t size,
                                              uint32_t dest_addr,  uint32_t type,
-                                             uint8_t  *mem_ptr = nullptr)
+                                             uint8_t  *mem_ptr,
+                                             MMIODevice* dev_instance,
+                                             uint32_t offset)
 {
     AddressMapEntry *entry;
+    AddressMapEntry *ref_entry;
 
-    // bail out if a memory region for the given range already exists
-    if (!is_range_free(start_addr, size))
-        return nullptr;
+    if (type & RT_MIRROR) {
+        ref_entry = find_range(dest_addr);
+        if (!ref_entry)
+            return nullptr;
 
-    if (!mem_ptr) {
-        mem_ptr = new uint8_t[size](); // allocate and clear to zero
-        this->mem_regions.push_back(mem_ptr);
+        // use origin's size if no size was specified
+        if (!size)
+            size = ref_entry->end - ref_entry->start + 1;
+
+        if (ref_entry->start + offset + size - 1 > ref_entry->end) {
+            LOG_F(ERROR, "Partial mirror outside the origin, offset=0x%X, size=0x%X",
+                offset, size);
+            return nullptr;
+        }
+
+        type |= ref_entry->type;
+        mem_ptr = ref_entry->mem_ptr + offset;
+    } else {
+        // bail out if a memory region for the given range already exists
+        if (!is_range_free(start_addr, size))
+            return nullptr;
+
+        if (!mem_ptr && (type & (RT_RAM | RT_ROM))) {
+            mem_ptr = new uint8_t[size](); // allocate and clear to zero
+            this->mem_regions.push_back(mem_ptr);
+        }
     }
 
     entry = new AddressMapEntry;
@@ -225,13 +247,22 @@ AddressMapEntry* MemCtrlBase::add_mem_region(uint32_t start_addr, uint32_t size,
     entry->end     = end;
     entry->mirror  = dest_addr;
     entry->type    = type;
-    entry->devobj  = nullptr;
+    entry->devobj  = dev_instance;
     entry->mem_ptr = mem_ptr;
 
     entry->rom_committed_ptr = nullptr;
     if (type & RT_ROM) {
         entry->rom_committed_ptr = new uint8_t[size]();
         this->rom_committed_copies.push_back(entry->rom_committed_ptr);
+    }
+
+    if (dev_instance) {
+        entry->read = [=](uint32_t rgn_start, uint32_t offset, int size) {
+            return dev_instance->read(rgn_start, offset, size);
+        };
+        entry->write = [=](uint32_t rgn_start, uint32_t offset, uint32_t value, int size) {
+            dev_instance->write(rgn_start, offset, value, size);
+        };
     }
 
     // Keep address_map sorted, that way the RAM region (which starts at 0 and
@@ -259,8 +290,9 @@ AddressMapEntry* MemCtrlBase::add_mem_region(uint32_t start_addr, uint32_t size,
 }
 
 
-AddressMapEntry* MemCtrlBase::add_rom_region(uint32_t start_addr, uint32_t size) {
-    return add_mem_region(start_addr, size, 0, RT_ROM);
+AddressMapEntry* MemCtrlBase::add_rom_region(uint32_t start_addr, uint32_t size,
+                                             MMIODevice* dev_instance) {
+    return add_mem_region(start_addr, size, 0, RT_ROM, nullptr, dev_instance, 0);
 }
 
 
