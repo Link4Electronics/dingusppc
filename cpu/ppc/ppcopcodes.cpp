@@ -1583,10 +1583,11 @@ void dppc_interpreter::ppc_icbi(uint32_t opcode) {
 }
 
 void dppc_interpreter::ppc_dcbf(uint32_t opcode) {
-    ppc_grab_regsab(opcode);
-    uint32_t ea = ppc_result_b + (reg_a ? ppc_result_a : 0);
-
-    mmu_dcbf(opcode, ea);
+    /* Data Cache Block Flush: on real hardware, flushes the dirty D-cache line
+       to main memory. In the emulator there is no D-cache, so data is always
+       in memory — this is a no-op. NOTE: we must NOT commit ROM data into
+       the pristine rom_committed_ptr here, or dcbi will later restore
+       corrupted data. */
 }
 
 void dppc_interpreter::ppc_dcbi(uint32_t opcode) {
@@ -1604,11 +1605,8 @@ void dppc_interpreter::ppc_dcbi(uint32_t opcode) {
 }
 
 void dppc_interpreter::ppc_dcbst(uint32_t opcode) {
-    // Data Cache Block Store: like dcbf, write back the dirty line.
-    ppc_grab_regsab(opcode);
-    uint32_t ea = ppc_result_b + (reg_a ? ppc_result_a : 0);
-
-    mmu_dcbf(opcode, ea);
+    /* Data Cache Block Store: same as dcbf — write back dirty line.
+       No-op in the emulator (see ppc_dcbf comment). */
 }
 
 void dppc_interpreter::ppc_dcbt(uint32_t opcode) {

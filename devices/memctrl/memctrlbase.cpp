@@ -228,11 +228,9 @@ AddressMapEntry* MemCtrlBase::add_mem_region(uint32_t start_addr, uint32_t size,
     entry->devobj  = nullptr;
     entry->mem_ptr = mem_ptr;
 
-    // Keep a clean copy of ROM regions for the dcbi/dcbf data-cache
-    // instructions (see the rom_committed_ptr comment).
     entry->rom_committed_ptr = nullptr;
     if (type & RT_ROM) {
-        entry->rom_committed_ptr = new uint8_t[size](); // allocate and clear
+        entry->rom_committed_ptr = new uint8_t[size]();
         this->rom_committed_copies.push_back(entry->rom_committed_ptr);
     }
 
@@ -303,7 +301,6 @@ AddressMapEntry* MemCtrlBase::add_mem_mirror_common(uint32_t start_addr, uint32_
     entry->type    = ref_entry->type | RT_MIRROR;
     entry->devobj  = nullptr;
     entry->mem_ptr = ref_entry->mem_ptr + offset;
-    // mirrors of ROM regions share the origin's committed copy
     entry->rom_committed_ptr = ref_entry->rom_committed_ptr ?
         ref_entry->rom_committed_ptr + offset : nullptr;
 
@@ -351,8 +348,6 @@ AddressMapEntry* MemCtrlBase::set_data(uint32_t load_addr, const uint8_t* data, 
     cpy_size = std::min(ref_entry->end - ref_entry->start + 1, size);
     memcpy(ref_entry->mem_ptr + load_offset, data, cpy_size);
 
-    // keep the committed (pristine) copy of ROM content in sync, so a later
-    // dcbi can restore the flash from it (see cache_block_invalidate)
     if (ref_entry->rom_committed_ptr)
         memcpy(ref_entry->rom_committed_ptr + load_offset, data, cpy_size);
 
@@ -509,8 +504,6 @@ uint8_t *MemCtrlBase::get_region_hostmem_ptr(const uint32_t addr) {
 }
 
 
-// shared implementation of the dcbi/dcbf data-cache block operations for
-// ROM-backed regions
 static void cache_block_op(AddressMapEntry* entry, uint32_t phys_addr, bool commit)
 {
     if (!entry || !entry->rom_committed_ptr)
@@ -526,12 +519,9 @@ static void cache_block_op(AddressMapEntry* entry, uint32_t phys_addr, bool comm
         return;
 
     if (commit) {
-        // dcbf/dcbst: write-back the dirty line, i.e. commit current content
         memcpy(entry->rom_committed_ptr + offset, entry->mem_ptr + offset,
                MemCtrlBase::CACHE_LINE_SIZE);
     } else {
-        // dcbi: discard the dirty line without write-back, i.e. restore the
-        // line from the committed copy
         memcpy(entry->mem_ptr + offset, entry->rom_committed_ptr + offset,
                MemCtrlBase::CACHE_LINE_SIZE);
     }

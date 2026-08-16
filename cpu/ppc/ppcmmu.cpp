@@ -783,10 +783,6 @@ static TLBEntry* dtlb2_refill(uint32_t guest_va, int is_write, bool is_dbg = fal
             tlb_entry->flags = flags | TLBFlags::PAGE_MEM;
             tlb_entry->host_va_offs_r = (int64_t)rgn_desc->mem_ptr - guest_va +
                                         (phys_addr - rgn_desc->start);
-            // ROM/flash regions are writable (write-through flash / RAM-backed
-            // BootROM window); the boot ROM's bus-speed measurement at 0xfff03b30
-            // relies on a scratch double at VA 0x40000000 (DBAT3 -> PA 0xFFF00000)
-            // being writable. The real mini's BootROM region accepts writes.
             tlb_entry->host_va_offs_w = tlb_entry->host_va_offs_r;
         }
         tlb_entry->phys_tag = phys_addr & ~0xFFFUL;
@@ -941,19 +937,11 @@ static void mmu_dcache_block(uint32_t opcode, uint32_t guest_va)
 
 void mmu_dcbi(uint32_t opcode, uint32_t guest_va)
 {
-    // Data Cache Block Invalidate: discard the dirty cache line without a
-    // write-back. The emulator has no data cache, so the stores that preceded
-    // the dcbi went straight to host memory; restore the line from the
-    // committed copy so "cache-scratchpad" code (e.g. the ROM's bus-speed
-    // measurement at 0xfff03bac, with a dcbz/stw/lfd scratch double at VA
-    // 0x40000000 -> PA 0xFFF00000) does not corrupt the flash / reset vector.
     mmu_dcache_block<false>(opcode, guest_va);
 }
 
 void mmu_dcbf(uint32_t opcode, uint32_t guest_va)
 {
-    // Data Cache Block Flush: write back the dirty line, i.e. commit the
-    // current content so a later dcbi keeps it.
     mmu_dcache_block<true>(opcode, guest_va);
 }
 
