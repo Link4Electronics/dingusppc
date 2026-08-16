@@ -139,6 +139,22 @@ private:
     uint32_t i2c_read(uint32_t offset, int size);
     void i2c_write(uint32_t offset, uint32_t value, int size);
 
+    // 64-bit free-running counter in the timer block (mac-io + 0x15000).
+    // The boot ROM resets it with word writes to +0x38/+0x3C, spins for a
+    // fixed decrementer window, then reads the count back to calibrate the
+    // bus/timebase frequencies (DT: clock = 18.432 MHz). Low word @ +0x38,
+    // high word @ +0x3C.
+    uint32_t timer_read(uint32_t offset, int size);
+    void timer_write(uint32_t offset, uint32_t value, int size);
+    uint64_t timer_count() const;
+
+    // ESCC (Z8530-style serial controller, MacRISC addressing: ch-a status
+    // @ +0x00 / data @ +0x10, ch-b status @ +0x20 / data @ +0x30 relative to
+    // the 0x13 sub-block base 0x80013000).
+    uint8_t escc_read_byte(uint32_t offset);
+    void escc_write_byte(uint32_t offset, uint8_t value);
+    void escc_tx_byte(uint8_t value);
+
     ViaPmu*  viapmu;
     OpenPic* openpic;
 
@@ -156,6 +172,10 @@ private:
     uint8_t  i2c_mode = 0;
     uint8_t  i2c_addr = 0;
     uint8_t  i2c_data = 0;
+
+    uint64_t timer_reset_ns = 0; // virtual ns at which the timer counter was reset
+
+    std::string escc_tx_buf;
 
     uint32_t unsupported_read_mask  = 0;
     uint32_t unsupported_write_mask = 0;

@@ -22,6 +22,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /** KeyLargo I/O controller emulation (Mac mini G4 / PowerMac10,1/10,2). */
 
 #include <core/memaccess.h>
+#include <cpu/ppc/ppcemu.h>
 #include <devices/deviceregistry.h>
 #include <devices/ioctrl/keylargo.h>
 #include <loguru.hpp>
@@ -101,6 +102,13 @@ uint32_t KeyLargo::read(uint32_t rgn_start, uint32_t offset, int size) {
         return this->viapmu->read((abs_offset >> 9) & 0xF);
     case KL_SUB_I2C:
         return this->i2c_read(abs_offset & 0xFFF, size);
+    case KL_SUB_TIMER:
+        return this->timer_read(abs_offset & 0xFFF, size);
+    case KL_SUB_ESCC:
+    case KL_SUB_ESCC_LEG:
+        if (size == 1)
+            return this->escc_read_byte(abs_offset & 0xFFF);
+        return 0;
     default:
         if (sub_addr >= KL_SUB_OPENPIC && this->openpic)
             return this->openpic->read(0, abs_offset - KL_OPENPIC_BASE, size);
@@ -127,6 +135,15 @@ void KeyLargo::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
         break;
     case KL_SUB_I2C:
         this->i2c_write(abs_offset & 0xFFF, value, size);
+        break;
+    case KL_SUB_TIMER:
+        this->timer_write(abs_offset & 0xFFF, value, size);
+        break;
+    case KL_SUB_ESCC:
+    case KL_SUB_ESCC_LEG:
+        for (int i = 0; i < size; i++)
+            this->escc_write_byte((abs_offset & 0xFFF) + i,
+                (value >> (8 * (size - 1 - i))) & 0xFF);
         break;
     default:
         if (sub_addr >= KL_SUB_OPENPIC && this->openpic) {
@@ -262,6 +279,93 @@ void KeyLargo::i2c_write(uint32_t offset, uint32_t value, int size)
         break;
     default:
         LOG_F(9, "%s: i2c write @%x = %02x", this->get_name().c_str(), offset, byte);
+    }
+}
+
+uint32_t KeyLargo::timer_read(uint32_t offset, int size)
+{
+    switch (offset) {
+    case 0x38: // counter low word (little-endian in memory; read via lwbrx)
+        return BYTESWAP_32((uint32_t)(this->timer_count() & 0xFFFFFFFF));
+    case 0x3C: // counter high word
+        return BYTESWAP_32((uint32_t)(this->timer_count() >> 32));
+    default:
+        if (!(this->unsupported_read_mask & (1 << KL_SUB_TIMER))) {
+            this->unsupported_read_mask |= (1 << KL_SUB_TIMER);
+            LOG_F(WARNING, "%s: timer read @%x.%c", this->get_name().c_str(),
+                KL_BAR0_BASE + 0x15000 + offset, SIZE_ARG(size));
+        }
+        return 0;
+    }
+}
+
+void KeyLargo::timer_write(uint32_t offset, uint32_t value, int size)
+{
+    if (offset == 0x38 || offset == 0x3C) {
+        // The boot ROM writes 0 to both words to reset the counter before a
+        // measurement window.
+        this->timer_reset_ns = get_virt_time_ns();
+        return;
+    }
+    if (!(this->unsupported_write_mask & (1 << KL_SUB_TIMER))) {
+        this->unsupported_write_mask |= (1 << KL_SUB_TIMER);
+        LOG_F(WARNING, "%s: timer write @%x.%c = %0*x", this->get_name().c_str(),
+            KL_BAR0_BASE + 0x15000 + offset, SIZE_ARG(size), size * 2, value);
+    }
+}
+
+uint64_t KeyLargo::timer_count() const
+{
+    // Count elapsed emulator virtual time at the DT clock frequency
+    // (18.432 MHz = 0.018432 ticks/ns), since the last reset write.
+    return (get_virt_time_ns() - this->timer_reset_ns) * 18432ULL / 1000000ULL;
+}
+
+/* ESCC registers (MacRISC addressing within the 0x13 sub-block):
+ *   +0x00 ch-a status/cmd, +0x10 ch-a data, +0x20 ch-b status/cmd,
+ *   +0x30 ch-b data. Status: bit 0 = RX data ready, bit 2 = TX buffer empty. */
+uint8_t KeyLargo::escc_read_byte(uint32_t offset)
+{
+    uint32_t rel = offset & 0xFFF;
+
+    if (rel & 0x10)
+        return 0xFF; // data register: no serial input connected
+
+    // status/command register: bit 2 = TX buffer empty (no RX data ever ready)
+    return 0x04;
+}
+
+void KeyLargo::escc_write_byte(uint32_t offset, uint8_t value)
+{
+    uint32_t rel = offset & 0xFFF;
+
+    if (rel & 0x10) {
+        this->escc_tx_byte(value); // data register = TX
+        return;
+    }
+    // status/command register: command bytes accepted and ignored.
+}
+
+void KeyLargo::escc_tx_byte(uint8_t value)
+{
+    // Accumulate console output and emit complete lines so the ROM's
+    // diagnostic output shows up in the emulator log.
+    if (value == '\r' || value == '\n') {
+        if (!this->escc_tx_buf.empty()) {
+            LOG_F(INFO, "%s: ESCC TX: %s", this->get_name().c_str(),
+                this->escc_tx_buf.c_str());
+            this->escc_tx_buf.clear();
+        }
+        return;
+    }
+    if (value >= 0x20 && value < 0x7F)
+        this->escc_tx_buf.push_back((char)value);
+    else
+        this->escc_tx_buf.push_back('.');
+    if (this->escc_tx_buf.size() >= 256) {
+        LOG_F(INFO, "%s: ESCC TX: %s", this->get_name().c_str(),
+            this->escc_tx_buf.c_str());
+        this->escc_tx_buf.clear();
     }
 }
 
