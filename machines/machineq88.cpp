@@ -142,7 +142,7 @@ static const PropMap q88_settings = {
     {"pci_ATA",
         new StrProperty("IntrepidAta")},
     {"pci_FireWire",
-        new StrProperty("")},
+        new StrProperty("TSB43AB22")},
     {"pci_GMAC",
         new StrProperty("SunGEM")},
     {"hdd_config",
