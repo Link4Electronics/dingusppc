@@ -25,7 +25,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <devices/common/hwcomponent.h>
 #include <devices/common/pci/pcidevice.h>
 #include <devices/deviceregistry.h>
-#include <devices/video/atiradeon.h>
+#include <devices/video/atiradeonR200.h>
 #include <loguru.hpp>
 
 #include <cstring>
@@ -496,6 +496,10 @@ void ATIRadeon::write_reg(uint32_t reg_offset, uint32_t value, uint32_t size) {
                 this->crtc_update();
             }
         }
+        if (bit_changed(old_value, new_value, 16)) { // CRTC_CUR_EN
+            this->cursor_dirty = true;
+            this->draw_fb = true;
+        }
         this->regs[reg_num] = new_value;
         return;
     case RADEON_CRTC_EXT_CNTL:
@@ -589,16 +593,16 @@ void ATIRadeon::write_reg(uint32_t reg_offset, uint32_t value, uint32_t size) {
         this->crtc_update();
         return;
     case RADEON_CUR_OFFSET:
-        this->regs[reg_num] = value & 0x87fffff0;
+        this->regs[reg_num] = value & 0x7FFFFFFF; // bit 31 = CUR_LOCK, bits [30:0] = byte addr
         this->cursor_dirty = true;
         draw_fb = true;
         return;
     case RADEON_CUR_HORZ_VERT_POSN:
-        this->regs[reg_num] = value & 0x3fff0fff;
+        this->regs[reg_num] = value & 0x3FFF3FFF; // bit 31 = CUR_LOCK, x=[29:16], y=[13:0]
         draw_fb = true;
         return;
     case RADEON_CUR_HORZ_VERT_OFF:
-        this->regs[reg_num] = value & 0x3f003f;
+        this->regs[reg_num] = value & 0x3F003F; // bit 31 = CUR_LOCK, xorigin=[21:16], yorigin=[5:0]
         this->cursor_dirty = true;
         draw_fb = true;
         return;
@@ -955,6 +959,9 @@ void ATIRadeon::crtc_update() {
     if (!bit_set(this->regs[RADEON_CRTC_GEN_CNTL >> 2], 25)) // CRTC_EN
         return;
 
+    if (!bit_set(this->regs[RADEON_CRTC_EXT_CNTL >> 2], 15)) // CRT_CRTC_ON
+        return;
+
     bool need_recalc = false;
 
     new_width  = (extract_bits<uint32_t>(this->regs[RADEON_CRTC_H_TOTAL_DISP >> 2],
@@ -1116,6 +1123,56 @@ int ATIRadeon::device_postinit()
     return 0;
 }
 
+void ATIRadeon::draw_hw_cursor(uint8_t *dst_row, int dst_pitch) {
+    int vert_off = extract_bits<uint32_t>(
+        this->regs[RADEON_CUR_HORZ_VERT_OFF >> 2], 16, 6);
+    int cur_height = 64 - vert_off;
+
+    uint32_t color0 = this->regs[RADEON_CUR_CLR0 >> 2] | 0xFF000000UL;
+    uint32_t color1 = this->regs[RADEON_CUR_CLR1 >> 2] | 0xFF000000UL;
+
+    // CUR_OFFSET is relative to CRTC display base on legacy chips
+    uint32_t cur_offset = this->regs[RADEON_CUR_OFFSET >> 2];
+    uint32_t crtc_offset = this->regs[RADEON_CRTC_OFFSET >> 2] & 0x07ffffff;
+    uint32_t img_offset = cur_offset + crtc_offset;
+    if (img_offset >= this->vram_size) {
+        return;
+    }
+
+    uint64_t *src_row = (uint64_t *)&this->vram_ptr[img_offset];
+    dst_pitch -= 64 * 4;
+
+    for (int h = cur_height; h > 0; h--) {
+        for (int x = 2; x > 0; x--) {
+            uint64_t px = *src_row++;
+            for (int p = 32; p > 0; p--, px >>= 2, dst_row += 4) {
+                switch (px & 3) {
+                case 0: // cursor color 0
+                    FB_WRITE(dst_row, color0);
+                    break;
+                case 1: // cursor color 1
+                    FB_WRITE(dst_row, color1);
+                    break;
+                case 2: // transparent
+                    FB_WRITE(dst_row, 0);
+                    break;
+                case 3: // 1's complement of display pixel
+                    FB_WRITE(dst_row, 0x7F000000);
+                    break;
+                }
+            }
+        }
+        dst_row += dst_pitch;
+    }
+}
+
+void ATIRadeon::get_cursor_position(int& x, int& y) {
+    x = extract_bits<uint32_t>(this->regs[RADEON_CUR_HORZ_VERT_POSN >> 2], 16, 14) -
+        extract_bits<uint32_t>(this->regs[RADEON_CUR_HORZ_VERT_OFF  >> 2], 16, 6);
+    y = extract_bits<uint32_t>(this->regs[RADEON_CUR_HORZ_VERT_POSN >> 2], 0, 14) -
+        extract_bits<uint32_t>(this->regs[RADEON_CUR_HORZ_VERT_OFF  >> 2], 0, 6);
+}
+
 void ATIRadeon::update_interrupt()
 {
     uint32_t int_cntl = this->regs[RADEON_GEN_INT_CNTL >> 2];
@@ -1185,6 +1242,11 @@ void ATIRadeon::draw_2d() {
     uint32_t rop3 = this->dp_mix & RADEON_DP_ROP3;
 
     switch (rop3) {
+    case RADEON_ROP3_NOOP:
+        // NOP: command flush / sync point. Just mark the framebuffer dirty so the
+        // refresh task picks up any prior VRAM writes.
+        this->draw_fb = true;
+        return;
     case RADEON_ROP3_SRCCOPY:
     {
         if (!src_stride) {
@@ -1286,6 +1348,52 @@ void ATIRadeon::draw_2d() {
                     d[x] = filler & 0xffff;
             } else {
                 memset(&row[dst_x], filler & 0xff, this->dst_width);
+            }
+        }
+        this->draw_fb = true;
+        break;
+    }
+    case RADEON_ROP3_XOR:
+    {
+        if (bpp == 24) {
+            LOG_F(WARNING, "%s: XOR blit unsupported in 24 bits", this->name.c_str());
+            return;
+        }
+
+        uint32_t xor_val = this->dp_src_frgd_clr;
+        if (bypp == 2) {
+            xor_val &= 0xffff;
+            xor_val = (xor_val << 16) | xor_val;
+        } else if (bypp == 1) {
+            xor_val &= 0xff;
+            xor_val = (xor_val << 24) | (xor_val << 16) | (xor_val << 8) | xor_val;
+        }
+
+        int x_skip, y_skip;
+        if (!radeon_clip_axis(dst_x, 1, this->dst_width, this->sc_left, this->sc_right,
+                              x_skip, this->dst_width) ||
+            !radeon_clip_axis(dst_y, 1, this->dst_height, this->sc_top, this->sc_bottom,
+                              y_skip, this->dst_height)) {
+            return;
+        }
+        dst_x += x_skip;
+        dst_y += y_skip;
+
+        for (uint32_t y = 0; y < this->dst_height; y++) {
+            uint8_t* row = &this->vram_ptr[this->dst_offset + (dst_y + int(y)) * dst_stride];
+            if (bypp == 4) {
+                uint32_t* d = (uint32_t*)&row[dst_x * 4];
+                for (uint32_t x = 0; x < this->dst_width; x++)
+                    d[x] ^= xor_val;
+            } else if (bypp == 2) {
+                uint16_t* d = (uint16_t*)&row[dst_x * 2];
+                for (uint32_t x = 0; x < this->dst_width; x++)
+                    d[x] ^= xor_val & 0xffff;
+            } else {
+                uint8_t* d = &row[dst_x];
+                uint8_t b = xor_val & 0xff;
+                for (uint32_t x = 0; x < this->dst_width; x++)
+                    d[x] ^= b;
             }
         }
         this->draw_fb = true;

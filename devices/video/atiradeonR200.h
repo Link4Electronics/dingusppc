@@ -19,11 +19,11 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#ifndef ATI_RADEON_H
-#define ATI_RADEON_H
+#ifndef ATI_RADEON_R200_H
+#define ATI_RADEON_R200_H
 
 #include <devices/common/pci/pcidevice.h>
-#include <devices/video/atiradeonregs.h>
+#include <devices/video/atiradeonR200regs.h>
 #include <devices/video/displayid.h>
 #include <devices/video/videoctrl.h>
 
@@ -67,6 +67,8 @@ private:
     void change_one_bar(uint32_t &aperture, uint32_t aperture_size,
                         uint32_t aperture_new, int bar_num);
     void draw_2d();
+    void draw_hw_cursor(uint8_t *dst_buf, int dst_pitch) override;
+    void get_cursor_position(int& x, int& y) override;
     void start_host_rect();
     void write_host_data(uint32_t value, uint32_t size);
 
@@ -142,4 +144,4 @@ private:
     int         dst_bpp() const;
 };
 
-#endif // ATI_RADEON_H
+#endif // ATI_RADEON_R200_H

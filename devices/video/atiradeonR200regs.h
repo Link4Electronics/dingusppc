@@ -19,8 +19,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#ifndef ATI_RADEON_DEFS_H
-#define ATI_RADEON_DEFS_H
+#ifndef ATI_RADEON_R200_REGS_H
+#define ATI_RADEON_R200_REGS_H
 
 /* ATI PCI device IDs. */
 enum {
@@ -207,6 +207,10 @@ enum {
 #define RADEON_CRTC2_EN              0x02000000
 #define RADEON_CRTC2_CUR_EN          0x00010000
 
+/* CRTC_GEN_CNTL (CRTC1). */
+#define RADEON_CRTC_CUR_EN           0x00010000
+#define RADEON_CRTC_CUR_MODE_MASK    0x000e0000
+
 /* CRTC_EXT_CNTL. */
 #define RADEON_CRT_CRTC_DISPLAY_DIS  0x00000400
 #define RADEON_CRT_CRTC_ON           0x00008000
@@ -243,6 +247,8 @@ enum {
 #define RADEON_GMC_DST_CLIPPING          0x00000008
 #define RADEON_GMC_ROP3_MASK             0x00ff0000
 #define RADEON_ROP3_MASK                 0x00ff0000
+#define RADEON_ROP3_NOOP                 0x00aa0000
+#define RADEON_ROP3_XOR                  0x005a0000
 #define RADEON_ROP3_BLACKNESS            0x00000000
 #define RADEON_ROP3_SRCCOPY              0x00cc0000
 #define RADEON_ROP3_PATCOPY              0x00f00000
@@ -264,4 +270,4 @@ enum {
 #define RADEON_DST_Y_MAJOR           0x00000004
 #define RADEON_DST_HOST_BIG_ENDIAN_EN 0x00000200
 
-#endif // ATI_RADEON_DEFS_H
+#endif // ATI_RADEON_R200_REGS_H
