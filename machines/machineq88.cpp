@@ -136,7 +136,7 @@ static const PropMap q88_settings = {
     {"pci_USB2",
         new StrProperty("")},
     {"pci_USB3",
-        new StrProperty("")},
+        new StrProperty("KeyLargoUSB")},
     {"pci_USB4",
         new StrProperty("")},
     {"pci_ATA",
