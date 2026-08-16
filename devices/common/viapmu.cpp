@@ -168,10 +168,6 @@ int ViaPmu::device_postinit()
     if (this->int_ctrl)
         this->irq_id = this->int_ctrl->register_dev_int(IntSrc::VIA_CUDA);
 
-    // 1-second tick (matches QEMU macio/pmu.c pmu_one_sec_timer)
-    this->one_sec_timer_id = TimerManager::get_instance()->add_cyclic_timer(
-        MSECS_TO_NSECS(1000), [this]() { this->one_sec_tick(); });
-
     return 0;
 }
 
@@ -502,6 +498,15 @@ void ViaPmu::dispatch_cmd()
         break;
     case 0xdf: // PMU_SYSTEM_READY
         LOG_F(INFO, "PMU_SYSTEM_READY");
+        // Start the 1-second tick now that the ROM has signaled readiness.
+        // Starting this earlier causes the tick interrupt to fire during the
+        // security scan (MSR.EE=1), which hits the early-boot exception
+        // vector at 0xFFF00500 and restarts the boot — an infinite loop.
+        if (!this->one_sec_timer_id) {
+            this->one_sec_timer_id = TimerManager::get_instance()->add_cyclic_timer(
+                MSECS_TO_NSECS(1000),
+                [this]() { this->one_sec_tick(); });
+        }
         break;
     case 0xe2: // PMU_DOWNLOAD_STATUS
         this->cmd_rsp[0] = 0x62; // OpenPMU status: ready
