@@ -144,7 +144,7 @@ static const PropMap q88_settings = {
     {"pci_FireWire",
         new StrProperty("")},
     {"pci_GMAC",
-        new StrProperty("")},
+        new StrProperty("SunGEM")},
     {"hdd_config",
         new StrProperty("Ide0:0")},
     {"cdr_config",
