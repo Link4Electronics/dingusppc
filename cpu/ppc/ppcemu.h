@@ -73,6 +73,8 @@ fpscr = FP Status and Condition Register
 
 typedef struct struct_ppc_state {
     FPR_storage fpr[32];
+    uint8_t vpr[32][16];    // AltiVec vector registers (byte 0 = most significant)
+    uint32_t vscr;          // AltiVec Vector Status and Control Register (bit 30 = SAT)
     uint32_t pc;    // Referred as the CIA in the PPC manual
     uint32_t gpr[32];
     uint32_t cr;
@@ -106,6 +108,7 @@ enum SPR : int {
     SDR1    = 25,
     SRR0    = 26,
     SRR1    = 27,
+    VRSAVE  = 256, // Vector Register Save/Restore (AltiVec)
     TBL_U   = 268, // user mode TBL
     TBU_U   = 269, // user mode TBU
     SPRG0   = 272,
@@ -312,6 +315,12 @@ enum XER : uint32_t {
     SO = 1UL << 31
 };
 
+/** Vector Status and Control Register (VSCR) bit definitions. */
+enum VSCR_bit : uint32_t {
+    VSCR_SAT = 1UL << 30, // Saturation sticky bit
+    VSCR_NJ  = 1UL << 31, // Non-Java mode
+};
+
 //for inf and nan checks
 enum FPOP : int {
     DIV    = 0x12,
@@ -331,6 +340,7 @@ enum class Except_Type {
     EXC_ALIGNMENT,
     EXC_PROGRAM,
     EXC_NO_FPU,
+    EXC_NO_ALTIVEC,
     EXC_DECR,
     EXC_SYSCALL = 12,
     EXC_TRACE   = 13
@@ -677,8 +687,7 @@ extern void ppc_fcmpo(uint32_t opcode);
 extern void ppc_fcmpu(uint32_t opcode);
 
 // Power-specific instructions
-template <field_rc rec, field_ov ov> extern void power_abs(uint32_t opcode);
-extern void power_clcs(uint32_t opcode);
+template <field_rc rec, field_ov ov> extern void power_abs(uint32_t opcode);extern void power_clcs(uint32_t opcode);
 template <field_rc rec, field_ov ov> extern void power_div(uint32_t opcode);
 template <field_rc rec, field_ov ov> extern void power_divs(uint32_t opcode);
 template <field_rc rec, field_ov ov> extern void power_doz(uint32_t opcode);
@@ -705,6 +714,19 @@ template <field_rc rec> extern void power_sriq(uint32_t opcode);
 template <field_rc rec> extern void power_srliq(uint32_t opcode);
 template <field_rc rec> extern void power_srlq(uint32_t opcode);
 template <field_rc rec> extern void power_srq(uint32_t opcode);
+
+// AltiVec instructions (opcode 4 dispatcher + vector loads/stores)
+extern void ppc_altivec_opcode(uint32_t opcode);
+extern void ppc_lvx(uint32_t opcode);
+extern void ppc_lvxl(uint32_t opcode);
+extern void ppc_lvebx(uint32_t opcode);
+extern void ppc_lvehx(uint32_t opcode);
+extern void ppc_lvewx(uint32_t opcode);
+extern void ppc_stvx(uint32_t opcode);
+extern void ppc_stvxl(uint32_t opcode);
+extern void ppc_stvebx(uint32_t opcode);
+extern void ppc_stvehx(uint32_t opcode);
+extern void ppc_stvewx(uint32_t opcode);
 }    // namespace dppc_interpreter
 
 // AltiVec instructions

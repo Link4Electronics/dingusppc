@@ -89,6 +89,11 @@ void ppc_exception_handler(Except_Type exception_type, uint32_t srr1_bits) {
         ppc_next_instruction_address = 0x0800;
         break;
 
+    case Except_Type::EXC_NO_ALTIVEC:
+        ppc_state.spr[SPR::SRR0]     = ppc_state.pc & 0xFFFFFFFC;
+        ppc_next_instruction_address = 0x0F20;
+        break;
+
     case Except_Type::EXC_DECR:
         if (exec_flags & ~EXEF_OPC_DECODER) {
             ppc_state.spr[SPR::SRR0] = ppc_next_instruction_address;
@@ -189,6 +194,10 @@ void ppc_exception_handler(Except_Type exception_type, uint32_t srr1_bits) {
 
     case Except_Type::EXC_NO_FPU:
         exc_descriptor = "Floating-Point unavailable exception occurred";
+        break;
+
+    case Except_Type::EXC_NO_ALTIVEC:
+        exc_descriptor = "AltiVec unavailable exception occurred";
         break;
 
     case Except_Type::EXC_DECR:

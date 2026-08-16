@@ -59,6 +59,7 @@ MemCtrlBase* mem_ctrl_instance = 0;
 
 bool is_601 = false;
 bool include_601 = false;
+bool is_altivec = false;
 PPCPowMode ppc_pow_mode = PPCPowMode::None;
 uint32_t ppc_pow_hid0_mask = 0;
 
@@ -1008,6 +1009,20 @@ void initialize_ppc_opcode_table() {
         OP63d(i + 31, ppc_fnmadd);
     }
 
+    if (is_altivec) {
+        OP(4, ppc_altivec_opcode);
+        OP31(7,   ppc_lvebx);
+        OP31(39,  ppc_lvehx);
+        OP31(71,  ppc_lvewx);
+        OP31(103, ppc_lvx);
+        OP31(135, ppc_stvebx);
+        OP31(167, ppc_stvehx);
+        OP31(199, ppc_stvewx);
+        OP31(231, ppc_stvx);
+        OP31(359, ppc_lvxl);
+        OP31(487, ppc_stvxl);
+    }
+
     for (auto i = 0; i < opcodeGrabberSize; i++) {
         if (OpcodeGrabberNoFPU[i] != ppc_fpu_off) {
             OpcodeGrabberNoFPU[i] = OpcodeGrabber[i];
@@ -1064,6 +1079,10 @@ void ppc_cpu_init(MemCtrlBase* mem_ctrl, const PPC_CPU_Config& config)
     }
     is_601 = (config.version >> 16) == 1;
     include_601 = is_601;
+    // MPC7450/MPC7447A (G4) and MPC970MP (G5) implement AltiVec.
+    is_altivec = (config.version == PPC_VER::MPC7450 ||
+                  config.version == PPC_VER::MPC7447A ||
+                  config.version == PPC_VER::MPC970MP);
     ppc_pow_mode = PPCPowMode::None;
     ppc_pow_hid0_mask = 0;
 
