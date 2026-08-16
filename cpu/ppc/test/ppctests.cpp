@@ -23,6 +23,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "../ppcemu.h"
 #include <cfenv>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -316,12 +317,288 @@ static void read_test_float_data() {
     }
 }
 
+static void altivec_test() {
+    cout << endl << "Testing AltiVec instructions:" << endl;
+
+    auto set_vr = [](int n, uint32_t w0, uint32_t w1, uint32_t w2, uint32_t w3) {
+        uint8_t* p = ppc_state.vpr[n];
+        uint32_t w[4] = {w0, w1, w2, w3};
+        for (int i = 0; i < 4; i++) {
+            p[4 * i]     = (uint8_t)(w[i] >> 24);
+            p[4 * i + 1] = (uint8_t)(w[i] >> 16);
+            p[4 * i + 2] = (uint8_t)(w[i] >> 8);
+            p[4 * i + 3] = (uint8_t)w[i];
+        }
+    };
+
+    auto vr_word = [](int n, int w) {
+        const uint8_t* p = ppc_state.vpr[n];
+        return ((uint32_t)p[4 * w] << 24) | ((uint32_t)p[4 * w + 1] << 16) |
+               ((uint32_t)p[4 * w + 2] << 8) | p[4 * w + 3];
+    };
+
+    auto f32_bits = [](float f) {
+        uint32_t bits;
+        std::memcpy(&bits, &f, 4);
+        return bits;
+    };
+
+    bool ok;
+
+    // vadduwm 1,2,3 = 0x10221880
+    set_vr(2, 0x00000001, 0x7FFFFFFF, 0xFFFFFFFF, 0x00000000);
+    set_vr(3, 0x00000002, 0x00000001, 0x00000000, 0x00000001);
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221880);
+    ok = vr_word(1, 0) == 0x00000003 && vr_word(1, 1) == 0x80000000 &&
+         vr_word(1, 2) == 0xFFFFFFFF && vr_word(1, 3) == 0x00000001;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vadduwm" << endl;
+        nfailed++;
+    }
+
+    // vsububm 1,2,3 = 0x10221C00
+    set_vr(2, 0x10203040, 0x50607080, 0x90A0B0C0, 0xD0E0F000);
+    set_vr(3, 0x0F0F0F0F, 0x0F0F0F0F, 0x0F0F0F0F, 0x0F0F0F0F);
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221C00);
+    ok = vr_word(1, 0) == 0x01112131 && vr_word(1, 1) == 0x41516171 &&
+         vr_word(1, 2) == 0x8191A1B1 && vr_word(1, 3) == 0xC1D1E1F1;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vsububm" << endl;
+        nfailed++;
+    }
+
+    // vaddsws 1,2,3 = 0x10221B80 (saturating add, sets VSCR[SAT])
+    set_vr(2, 0x7FFFFFFF, 0, 0, 0);
+    set_vr(3, 0x00000001, 0, 0, 0);
+    ppc_state.vscr = 0;
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221B80);
+    ok = vr_word(1, 0) == 0x7FFFFFFF && vr_word(1, 1) == 0 && vr_word(1, 2) == 0 &&
+         vr_word(1, 3) == 0 && (ppc_state.vscr & VSCR_bit::VSCR_SAT);
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vaddsws" << endl;
+        nfailed++;
+    }
+
+    // vmaxub 1,2,3 = 0x10221802
+    set_vr(2, 0x10203040, 0x50607080, 0x90A0B0C0, 0xD0E0F000);
+    set_vr(3, 0x10209040, 0x5060F080, 0x90A0B0C0, 0xD0E0F001);
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221802);
+    ok = vr_word(1, 0) == 0x10209040 && vr_word(1, 1) == 0x5060F080 &&
+         vr_word(1, 2) == 0x90A0B0C0 && vr_word(1, 3) == 0xD0E0F001;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vmaxub" << endl;
+        nfailed++;
+    }
+
+    // vminuh 1,2,3 = 0x10221A42
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221A42);
+    ok = vr_word(1, 0) == 0x10203040 && vr_word(1, 1) == 0x50607080 &&
+         vr_word(1, 2) == 0x90A0B0C0 && vr_word(1, 3) == 0xD0E0F000;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vminuh" << endl;
+        nfailed++;
+    }
+
+    // vslb 1,2,3 = 0x10221904
+    set_vr(2, 0x80000001, 0x00000080, 0x01020304, 0x0F0F0F0F);
+    set_vr(3, 0x01020304, 0x00000001, 0x05040302, 0x08000000);
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221904);
+    ok = vr_word(1, 0) == 0x00000010 && vr_word(1, 1) == 0x00000000 &&
+         vr_word(1, 2) == 0x20201810 && vr_word(1, 3) == 0x0F0F0F0F;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vslb" << endl;
+        nfailed++;
+    }
+
+    // vspltisw 1,-1 = 0x103F038C
+    ppc_main_opcode(ppc_opcode_grabber, 0x103F038C);
+    ok = vr_word(1, 0) == 0xFFFFFFFF && vr_word(1, 1) == 0xFFFFFFFF &&
+         vr_word(1, 2) == 0xFFFFFFFF && vr_word(1, 3) == 0xFFFFFFFF;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vspltisw" << endl;
+        nfailed++;
+    }
+
+    // vspltb 1,2,3 = 0x1023120C (splat vpr2 byte 3 = 0x01)
+    set_vr(2, 0x80000001, 0x00000080, 0x01020304, 0x0F0F0F0F);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1023120C);
+    ok = vr_word(1, 0) == 0x01010101 && vr_word(1, 1) == 0x01010101 &&
+         vr_word(1, 2) == 0x01010101 && vr_word(1, 3) == 0x01010101;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vspltb" << endl;
+        nfailed++;
+    }
+
+    // vcmpequb. 1,2,3 = 0x10221C06 (dot: records CR6, all equal)
+    set_vr(2, 0x11223344, 0x55667788, 0x99AABBCC, 0xDDEEFF00);
+    set_vr(3, 0x11223344, 0x55667788, 0x99AABBCC, 0xDDEEFF00);
+    ppc_state.cr = 0;
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221C06);
+    ok = (ppc_state.cr & 0xF0) == 0x80 && vr_word(1, 0) == 0xFFFFFFFF &&
+         vr_word(1, 1) == 0xFFFFFFFF && vr_word(1, 2) == 0xFFFFFFFF &&
+         vr_word(1, 3) == 0xFFFFFFFF;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vcmpequb." << endl;
+        nfailed++;
+    }
+
+    // vcmpequb 1,2,3 = 0x10221806 (no dot: must NOT touch CR6)
+    set_vr(3, 0x11223344, 0x55667788, 0x99AABBCC, 0xDDEEFF01);
+    ppc_state.cr = 0x0F000000;
+    ppc_main_opcode(ppc_opcode_grabber, 0x10221806);
+    ok = (ppc_state.cr & 0xF0) == 0 && vr_word(1, 0) == 0xFFFFFFFF &&
+         vr_word(1, 1) == 0xFFFFFFFF && vr_word(1, 2) == 0xFFFFFFFF &&
+         vr_word(1, 3) == 0xFFFFFF00;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vcmpequb got cr=" << hex << ppc_state.cr << " " << vr_word(1, 0) << " "
+             << vr_word(1, 1) << " " << vr_word(1, 2) << " " << vr_word(1, 3) << dec << endl;
+        nfailed++;
+    }
+
+    // vsldoi 1,2,3,4 = 0x1022192C
+    set_vr(2, 0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF);
+    set_vr(3, 0x10203040, 0x50607080, 0x90A0B0C0, 0xD0E0F000);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1022192C);
+    ok = vr_word(1, 0) == 0x44556677 && vr_word(1, 1) == 0x8899AABB &&
+         vr_word(1, 2) == 0xCCDDEEFF && vr_word(1, 3) == 0x10203040;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vsldoi" << endl;
+        nfailed++;
+    }
+
+    // vsel 1,2,3,4 = 0x1022192A (byte MSB of VRC selects)
+    set_vr(2, 0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F);
+    set_vr(3, 0x10111213, 0x14151617, 0x18191A1B, 0x1C1D1E1F);
+    set_vr(4, 0x00800080, 0x00800080, 0x00800080, 0x00800080);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1022192A);
+    ok = vr_word(1, 0) == 0x00110213 && vr_word(1, 1) == 0x04150617 &&
+         vr_word(1, 2) == 0x08190A1B && vr_word(1, 3) == 0x0C1D0E1F;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vsel" << endl;
+        nfailed++;
+    }
+
+    // vperm 1,2,3,4 = 0x1022192B
+    set_vr(2, 0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF);
+    set_vr(3, 0xFFEEDDCC, 0xBBAA9988, 0x77665544, 0x33221100);
+    set_vr(4, 0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1022192B);
+    ok = vr_word(1, 0) == 0x00112233 && vr_word(1, 1) == 0x44556677 &&
+         vr_word(1, 2) == 0x8899AABB && vr_word(1, 3) == 0xCCDDEEFF;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vperm" << endl;
+        nfailed++;
+    }
+
+    // vperm 1,2,3,4 with VRC = 0x10..0x1F selects from VRB
+    set_vr(4, 0x10111213, 0x14151617, 0x18191A1B, 0x1C1D1E1F);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1022192B);
+    ok = vr_word(1, 0) == 0xFFEEDDCC && vr_word(1, 1) == 0xBBAA9988 &&
+         vr_word(1, 2) == 0x77665544 && vr_word(1, 3) == 0x33221100;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vperm (VRB)" << endl;
+        nfailed++;
+    }
+
+    // mtvscr/mfvscr: set_vr word 3 = 0xC0000000 sets VSCR[NJ|SAT]
+    set_vr(1, 0, 0, 0, 0xC0000000);
+    ppc_main_opcode(ppc_opcode_grabber, 0x10000E44); // mtvscr 1
+    ok = ppc_state.vscr == 0xC0000000;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: mtvscr" << endl;
+        nfailed++;
+    }
+    ppc_main_opcode(ppc_opcode_grabber, 0x10400604); // mfvscr 2
+    ok = vr_word(2, 0) == 0 && vr_word(2, 1) == 0 && vr_word(2, 2) == 0 &&
+         vr_word(2, 3) == 0xC0000000;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: mfvscr" << endl;
+        nfailed++;
+    }
+
+    // vmaddfp 1,2,3,4 = 0x102220EE (VRT = VRA*VRC + VRB)
+    set_vr(2, f32_bits(2.0f), f32_bits(-3.5f), 0, 0);
+    set_vr(3, f32_bits(4.0f), f32_bits(2.0f), 0, 0);
+    set_vr(4, f32_bits(1.0f), f32_bits(0.5f), 0, 0);
+    ppc_main_opcode(ppc_opcode_grabber, 0x102220EE);
+    ok = vr_word(1, 0) == f32_bits(9.0f) && vr_word(1, 1) == f32_bits(-6.5f) &&
+         vr_word(1, 2) == 0 && vr_word(1, 3) == 0;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vmaddfp" << endl;
+        nfailed++;
+    }
+
+    // vcfux 1,2,3 = 0x1023130A (u32 * 2^-uim)
+    set_vr(2, 0x00000010, 0x00000001, 0x80000000, 0);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1023130A);
+    ok = vr_word(1, 0) == f32_bits(2.0f) && vr_word(1, 1) == f32_bits(0.125f) &&
+         vr_word(1, 2) == f32_bits(268435456.0f) && vr_word(1, 3) == f32_bits(0.0f);
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vcfux" << endl;
+        nfailed++;
+    }
+
+    // vctuxs 1,2,3 = 0x1023138A (trunc(f * 2^uim), saturate)
+    set_vr(2, f32_bits(2.0f), f32_bits(-1.0f), f32_bits(3.5f), f32_bits(536870912.0f));
+    ppc_state.vscr = 0;
+    ppc_main_opcode(ppc_opcode_grabber, 0x1023138A);
+    ok = vr_word(1, 0) == 16 && vr_word(1, 1) == 0 && vr_word(1, 2) == 28 &&
+         vr_word(1, 3) == 0xFFFFFFFF && (ppc_state.vscr & VSCR_bit::VSCR_SAT);
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vctuxs" << endl;
+        nfailed++;
+    }
+
+    // vupkhsb 1,2 = 0x1020120E (sign-extend high 8 bytes)
+    set_vr(2, 0xFF010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1020120E);
+    ok = vr_word(1, 0) == 0xFFFF0001 && vr_word(1, 1) == 0x00020003 &&
+         vr_word(1, 2) == 0x00040005 && vr_word(1, 3) == 0x00060007;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vupkhsb" << endl;
+        nfailed++;
+    }
+
+    // vpkuhum 1,2,3 = 0x1022180E (pack low bytes of halfwords)
+    set_vr(2, 0x11223344, 0x55667788, 0x99AABBCC, 0xDDEEFF00);
+    set_vr(3, 0x10203040, 0x50607080, 0x90A0B0C0, 0xD0E0F000);
+    ppc_main_opcode(ppc_opcode_grabber, 0x1022180E);
+    ok = vr_word(1, 0) == 0x22446688 && vr_word(1, 1) == 0xAACCEE00 &&
+         vr_word(1, 2) == 0x20406080 && vr_word(1, 3) == 0xA0C0E000;
+    ntested++;
+    if (!ok) {
+        cout << "Mismatch: vpkuhum" << endl;
+        nfailed++;
+    }
+}
+
 int main() {
     is_601 = true;
+    is_altivec = true;
     initialize_ppc_opcode_table(); //kludge
     // MPC601 sets MSR[ME] bit during hard reset / Power-On.
     // Also set MSR[FP] bit so we can test FPU instructions.
-    int new_msr = (MSR::ME | MSR::IP | MSR::FP);
+    int new_msr = (MSR::ME | MSR::IP | MSR::FP | MSR::VEC);
     ppc_msr_did_change(ppc_state.msr, new_msr, false);
 
     cout << "Running DingusPPC emulator tests..." << endl << endl;
@@ -343,6 +620,8 @@ int main() {
     cout << endl << "Testing floating point instructions:" << endl;
 
     read_test_float_data();
+
+    altivec_test();
 
     cout << "... completed." << endl;
     cout << "--> Tested instructions: " << dec << ntested << endl;
