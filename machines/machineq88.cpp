@@ -149,6 +149,8 @@ static const PropMap q88_settings = {
         new StrProperty("Ide0:0")},
     {"cdr_config",
         new StrProperty("Ide0:1")},
+    {"serial_backend",
+        new StrProperty("stdio", std::vector<std::string>({"null", "stdio", "socket"}))},
 };
 
 static std::vector<std::string> q88_devices = {

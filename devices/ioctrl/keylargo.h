@@ -49,6 +49,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <devices/common/pci/pcidevice.h>
 #include <devices/common/viapmu.h>
 #include <devices/ioctrl/openpic.h>
+#include <devices/serial/escc.h>
 #include <devices/sound/soundserver.h>
 
 #include <cinttypes>
@@ -186,10 +187,10 @@ private:
     // the 0x13 sub-block base 0x80013000).
     uint8_t escc_read_byte(uint32_t offset);
     void escc_write_byte(uint32_t offset, uint8_t value);
-    void escc_tx_byte(uint8_t value);
 
-    ViaPmu*  viapmu;
-    OpenPic* openpic;
+    ViaPmu*       viapmu;
+    OpenPic*      openpic;
+    EsccController* escc;
 
     uint32_t base_addr   = 0;
     int      iomem_size  = 0x80000;
@@ -207,8 +208,6 @@ private:
     uint8_t  i2c_data = 0;
 
     uint64_t timer_reset_ns = 0; // virtual ns at which the timer counter was reset
-
-    std::string escc_tx_buf;
 
     // I2S state
     uint32_t i2s_ctrl      = 0; // I2S control register

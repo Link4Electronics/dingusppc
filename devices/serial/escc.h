@@ -150,6 +150,13 @@ public:
         }
     }
 
+    void set_channel_backend(ChIndex ch_idx, int backend_id) {
+        switch (ch_idx) {
+        case CH_A: ch_a->attach_backend(backend_id); break;
+        case CH_B: ch_b->attach_backend(backend_id); break;
+        }
+    }
+
 private:
     void reset();
     void write_internal(EsccChannel* ch, uint8_t value);

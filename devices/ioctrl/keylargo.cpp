@@ -53,6 +53,9 @@ KeyLargo::KeyLargo() : PCIDevice("KeyLargo"), InterruptCtrl() {
     // as KeyLargo subdevices)
     this->viapmu = dynamic_cast<ViaPmu*>(gMachineObj->get_comp_by_name("ViaPmu"));
     this->openpic = dynamic_cast<OpenPic*>(gMachineObj->get_comp_by_name("OpenPic"));
+
+    // create the ESCC (Z8530) serial controller
+    this->escc = new EsccController();
 }
 
 int KeyLargo::device_postinit()
@@ -90,6 +93,10 @@ int KeyLargo::device_postinit()
     this->snd_in_dma->register_dma_int(this,
         this->register_dma_int(IntSrc::DMA_DAVBUS_Rx));
 
+    // Wire ESCC channel A to stdio so the boot ROM's keypress poll works.
+    this->escc->set_channel_backend(CH_A, CHARIO_BE_STDIO);
+    this->escc->set_channel_backend(CH_B, CHARIO_BE_NULL);
+
     return 0;
 }
 
@@ -123,7 +130,7 @@ uint32_t KeyLargo::read(uint32_t rgn_start, uint32_t offset, int size) {
     case KL_SUB_ESCC:
     case KL_SUB_ESCC_LEG:
         if (size == 1)
-            return this->escc_read_byte(abs_offset & 0xFFF);
+            return this->escc_read_byte(abs_offset);
         return 0;
     case KL_SUB_I2S:
         return this->i2s_read(abs_offset & 0xFFF, size);
@@ -162,7 +169,7 @@ void KeyLargo::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
     case KL_SUB_ESCC:
     case KL_SUB_ESCC_LEG:
         for (int i = 0; i < size; i++)
-            this->escc_write_byte((abs_offset & 0xFFF) + i,
+            this->escc_write_byte(abs_offset + i,
                 (value >> (8 * (size - 1 - i))) & 0xFF);
         break;
     case KL_SUB_I2S:
@@ -506,49 +513,53 @@ void KeyLargo::dbdma_write(uint32_t offset, uint32_t value, int size)
 
 /* ESCC registers (MacRISC addressing within the 0x13 sub-block):
  *   +0x00 ch-a status/cmd, +0x10 ch-a data, +0x20 ch-b status/cmd,
- *   +0x30 ch-b data. Status: bit 0 = RX data ready, bit 2 = TX buffer empty. */
+ *   +0x30 ch-b data. Legacy addressing (0x12 sub-block):
+ *   +0x00 ch-b status/cmd, +0x04 ch-a status/cmd, +0x08 ch-b data,
+ *   +0x0C ch-a data, +0x40 enh-B, +0x44 enh-A. */
+static const uint8_t macrisc_reg_map[4] = {2, 3, 0, 1}; // +0x00,+0x10,+0x20,+0x30
+
 uint8_t KeyLargo::escc_read_byte(uint32_t offset)
 {
     uint32_t rel = offset & 0xFFF;
 
-    if (rel & 0x10)
-        return 0xFF; // data register: no serial input connected
+    // MacRISC addressing (sub-block 0x13): registers at 0x00/0x10/0x20/0x30
+    if (offset & 0x1000) { // 0x13 sub-block (bit 12 set)
+        unsigned idx = (rel >> 4) & 3;
+        return this->escc->read(macrisc_reg_map[idx]);
+    }
 
-    // status/command register: bit 2 = TX buffer empty (no RX data ever ready)
-    return 0x04;
+    // Legacy addressing (sub-block 0x12): registers at +0x00/0x04/0x08/0x0C
+    switch (rel & 0x7F) {
+    case 0x00: return this->escc->read(EsccReg::Port_B_Cmd);
+    case 0x04: return this->escc->read(EsccReg::Port_A_Cmd);
+    case 0x08: return this->escc->read(EsccReg::Port_B_Data);
+    case 0x0C: return this->escc->read(EsccReg::Port_A_Data);
+    case 0x40: return this->escc->read(EsccReg::Enh_Reg_B);
+    case 0x44: return this->escc->read(EsccReg::Enh_Reg_A);
+    default:   return 0;
+    }
 }
 
 void KeyLargo::escc_write_byte(uint32_t offset, uint8_t value)
 {
     uint32_t rel = offset & 0xFFF;
 
-    if (rel & 0x10) {
-        this->escc_tx_byte(value); // data register = TX
+    // MacRISC addressing (sub-block 0x13)
+    if (offset & 0x1000) {
+        unsigned idx = (rel >> 4) & 3;
+        this->escc->write(macrisc_reg_map[idx], value);
         return;
     }
-    // status/command register: command bytes accepted and ignored.
-}
 
-void KeyLargo::escc_tx_byte(uint8_t value)
-{
-    // Accumulate console output and emit complete lines so the ROM's
-    // diagnostic output shows up in the emulator log.
-    if (value == '\r' || value == '\n') {
-        if (!this->escc_tx_buf.empty()) {
-            LOG_F(INFO, "%s: ESCC TX: %s", this->get_name().c_str(),
-                this->escc_tx_buf.c_str());
-            this->escc_tx_buf.clear();
-        }
-        return;
-    }
-    if (value >= 0x20 && value < 0x7F)
-        this->escc_tx_buf.push_back((char)value);
-    else
-        this->escc_tx_buf.push_back('.');
-    if (this->escc_tx_buf.size() >= 256) {
-        LOG_F(INFO, "%s: ESCC TX: %s", this->get_name().c_str(),
-            this->escc_tx_buf.c_str());
-        this->escc_tx_buf.clear();
+    // Legacy addressing (sub-block 0x12)
+    switch (rel & 0x7F) {
+    case 0x00: this->escc->write(EsccReg::Port_B_Cmd, value); break;
+    case 0x04: this->escc->write(EsccReg::Port_A_Cmd, value); break;
+    case 0x08: this->escc->write(EsccReg::Port_B_Data, value); break;
+    case 0x0C: this->escc->write(EsccReg::Port_A_Data, value); break;
+    case 0x40: this->escc->write(EsccReg::Enh_Reg_B, value); break;
+    case 0x44: this->escc->write(EsccReg::Enh_Reg_A, value); break;
+    default: break;
     }
 }
 
