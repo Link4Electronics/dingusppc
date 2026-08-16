@@ -74,6 +74,22 @@ int KeyLargo::device_postinit()
     // calibration; the emulated PMU has nothing to report, so hold the line
     // asserted like an idle PMU99.
     this->gpio_extint[KL_GPIO_PMU_MSG_IRQ - KL_GPIO_EXTINT_0] |= 0x02;
+
+    // Create audio DMA channels and wire them to the SoundServer.
+    // Channel 8 (audio out) pulls PCM samples from guest RAM and feeds
+    // them to the host audio device via the I2S TX path.
+    this->snd_out_dma = std::unique_ptr<DMAChannel>(new DMAChannel("snd_out"));
+    this->snd_out_dma->register_dma_int(this,
+        this->register_dma_int(IntSrc::DMA_DAVBUS_Tx));
+    this->snd_out_dma->set_callbacks(
+        std::bind(&KeyLargo::i2s_dma_out_start, this),
+        std::bind(&KeyLargo::i2s_dma_out_stop, this)
+    );
+
+    this->snd_in_dma = std::unique_ptr<DMAChannel>(new DMAChannel("snd_in"));
+    this->snd_in_dma->register_dma_int(this,
+        this->register_dma_int(IntSrc::DMA_DAVBUS_Rx));
+
     return 0;
 }
 
@@ -109,6 +125,10 @@ uint32_t KeyLargo::read(uint32_t rgn_start, uint32_t offset, int size) {
         if (size == 1)
             return this->escc_read_byte(abs_offset & 0xFFF);
         return 0;
+    case KL_SUB_I2S:
+        return this->i2s_read(abs_offset & 0xFFF, size);
+    case KL_SUB_DBDMA:
+        return this->dbdma_read(abs_offset & 0xFFF, size);
     default:
         if (sub_addr >= KL_SUB_OPENPIC && this->openpic)
             return this->openpic->read(0, abs_offset - KL_OPENPIC_BASE, size);
@@ -144,6 +164,12 @@ void KeyLargo::write(uint32_t rgn_start, uint32_t offset, uint32_t value, int si
         for (int i = 0; i < size; i++)
             this->escc_write_byte((abs_offset & 0xFFF) + i,
                 (value >> (8 * (size - 1 - i))) & 0xFF);
+        break;
+    case KL_SUB_I2S:
+        this->i2s_write(abs_offset & 0xFFF, value, size);
+        break;
+    case KL_SUB_DBDMA:
+        this->dbdma_write(abs_offset & 0xFFF, value, size);
         break;
     default:
         if (sub_addr >= KL_SUB_OPENPIC && this->openpic) {
@@ -319,6 +345,163 @@ uint64_t KeyLargo::timer_count() const
     // Count elapsed emulator virtual time at the DT clock frequency
     // (18.432 MHz = 0.018432 ticks/ns), since the last reset write.
     return (get_virt_time_ns() - this->timer_reset_ns) * 18432ULL / 1000000ULL;
+}
+
+/* ---- I2S (sound) sub-block at mac-io + 0x10000 ----
+ *
+ *  The boot ROM configures I2S clocks and format, then starts DBDMA
+ *  channel 8 (audio out) to stream PCM samples.  The I2S TX data path
+ *  is wired to the host SoundServer so that the boot chime plays through
+ *  the host audio device.
+ *
+ *  Register map (offsets relative to sub-block base 0x80010000):
+ *    0x000  I2S control    (bit 0 = TX enable)
+ *    0x004  frame counter
+ *    0x008  status          (read-only, 0 = idle)
+ *    0x00C  serial clock config
+ *    0x010  data FIFO       (write-only, ignored – DMA feeds data directly)
+ */
+
+uint32_t KeyLargo::i2s_read(uint32_t offset, int size)
+{
+    switch (offset & ~3) {
+    case KL_I2S_CTRL:
+        return this->i2s_ctrl;
+    case KL_I2S_FRAME_CNT:
+        return this->i2s_frame_cnt;
+    case KL_I2S_STATUS:
+        return this->i2s_status;
+    case KL_I2S_CLK_CFG:
+        return this->i2s_clk_cfg;
+    default:
+        if (!(this->unsupported_read_mask & (1 << KL_SUB_I2S))) {
+            this->unsupported_read_mask |= (1 << KL_SUB_I2S);
+            LOG_F(WARNING, "%s: I2S read @%x.%c", this->get_name().c_str(),
+                KL_BAR0_BASE + 0x10000 + offset, SIZE_ARG(size));
+        }
+        return 0;
+    }
+}
+
+void KeyLargo::i2s_write(uint32_t offset, uint32_t value, int size)
+{
+    switch (offset & ~3) {
+    case KL_I2S_CTRL: {
+        uint32_t old = this->i2s_ctrl;
+        this->i2s_ctrl = value;
+        // bit 0 = I2S TX enable
+        if ((value & 1) && !(old & 1)) {
+            this->i2s_dma_out_start();
+        } else if (!(value & 1) && (old & 1)) {
+            this->i2s_dma_out_stop();
+        }
+        break;
+    }
+    case KL_I2S_FRAME_CNT:
+        this->i2s_frame_cnt = value;
+        break;
+    case KL_I2S_CLK_CFG:
+        this->i2s_clk_cfg = value;
+        break;
+    case KL_I2S_FIFO:
+        // write to TX FIFO ignored – data arrives via DMA
+        break;
+    default:
+        if (!(this->unsupported_write_mask & (1 << KL_SUB_I2S))) {
+            this->unsupported_write_mask |= (1 << KL_SUB_I2S);
+            LOG_F(WARNING, "%s: I2S write @%x.%c = %0*x", this->get_name().c_str(),
+                KL_BAR0_BASE + 0x10000 + offset, SIZE_ARG(size), size * 2, value);
+        }
+    }
+}
+
+void KeyLargo::i2s_dma_out_start()
+{
+    if (this->out_stream_ready)
+        return;
+
+    if (!this->snd_server) {
+        this->snd_server = dynamic_cast<SoundServer *>(
+            gMachineObj->get_comp_by_name("SoundServer"));
+        if (!this->snd_server) {
+            LOG_F(ERROR, "%s: SoundServer not found", this->get_name().c_str());
+            return;
+        }
+    }
+
+    // Boot chime is 44100 Hz stereo 16-bit PCM.  The I2S serial clock
+    // divider is not decoded – just use the standard rate.
+    int err = this->snd_server->open_out_stream(44100, this->snd_out_dma.get());
+    if (err) {
+        LOG_F(ERROR, "%s: unable to open sound output stream: %d",
+              this->get_name().c_str(), err);
+        return;
+    }
+
+    err = this->snd_server->start_out_stream();
+    if (err) {
+        LOG_F(ERROR, "%s: could not start sound output stream: %d",
+              this->get_name().c_str(), err);
+        return;
+    }
+
+    this->out_stream_ready = true;
+    LOG_F(INFO, "%s: I2S TX started, 44100 Hz output stream open", this->get_name().c_str());
+}
+
+void KeyLargo::i2s_dma_out_stop()
+{
+    if (this->out_stream_ready && this->snd_server) {
+        this->snd_server->close_out_stream();
+        this->out_stream_ready = false;
+        LOG_F(INFO, "%s: I2S TX stopped", this->get_name().c_str());
+    }
+}
+
+/* ---- DBDMA sub-block at mac-io + 0x08000 ----
+ *
+ *  The DBDMA controller provides 16 DMA channels, each 0x100 bytes apart.
+ *  Channel 8 = audio out (TX), channel 9 = audio in (RX).
+ *  Only the audio channels are wired; the rest return 0 / are ignored.
+ */
+
+uint32_t KeyLargo::dbdma_read(uint32_t offset, int size)
+{
+    int ch = offset >> 8;
+
+    switch (ch) {
+    case KL_DMA_AUDIO_OUT:
+        return this->snd_out_dma->reg_read(offset & 0xFF, size);
+    case KL_DMA_AUDIO_IN:
+        return this->snd_in_dma->reg_read(offset & 0xFF, size);
+    default:
+        if (!(this->unsupported_read_mask & (1 << KL_SUB_DBDMA))) {
+            this->unsupported_read_mask |= (1 << KL_SUB_DBDMA);
+            LOG_F(WARNING, "%s: DBDMA ch %d read @%x.%c", this->get_name().c_str(),
+                ch, KL_BAR0_BASE + 0x08000 + offset, SIZE_ARG(size));
+        }
+        return 0;
+    }
+}
+
+void KeyLargo::dbdma_write(uint32_t offset, uint32_t value, int size)
+{
+    int ch = offset >> 8;
+
+    switch (ch) {
+    case KL_DMA_AUDIO_OUT:
+        this->snd_out_dma->reg_write(offset & 0xFF, value, size);
+        break;
+    case KL_DMA_AUDIO_IN:
+        this->snd_in_dma->reg_write(offset & 0xFF, value, size);
+        break;
+    default:
+        if (!(this->unsupported_write_mask & (1 << KL_SUB_DBDMA))) {
+            this->unsupported_write_mask |= (1 << KL_SUB_DBDMA);
+            LOG_F(WARNING, "%s: DBDMA ch %d write @%x.%c = %0*x", this->get_name().c_str(),
+                ch, KL_BAR0_BASE + 0x08000 + offset, SIZE_ARG(size), size * 2, value);
+        }
+    }
 }
 
 /* ESCC registers (MacRISC addressing within the 0x13 sub-block):
