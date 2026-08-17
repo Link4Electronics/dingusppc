@@ -57,6 +57,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <string>
 #include <vector>
 
+class Intrepid; // forward declaration for config window forwarding
+
 /** KeyLargo control/GPIO register offsets. */
 enum KeyLargoReg : uint32_t {
     KL_MBCR            = 0x34, // media bay control/status
@@ -112,23 +114,28 @@ enum KeyLargoI2CReg : uint32_t {
 
 /** KeyLargo I2S controller registers (offsets within the 0x10 sub-block).
  *
- *  The I2S block sits at mac-io + 0x10000 and provides the audio data path
- *  to an external DAC.  The boot ROM configures clock and format, then
- *  starts DBDMA channel 8 (audio out) to stream PCM data through I2S TX.
- *  Register offsets are from the sub-block base (0x80010000). */
+ *  Per Linux sound/aoa/soundbus/i2sbus/interface.h.  The boot ROM
+ *  configures clocks and format, then starts DBDMA channel 0 (audio out)
+ *  to stream PCM data through I2S TX to the Toonie DAC. */
 enum KeyLargoI2SReg : uint32_t {
-    KL_I2S_CTRL      = 0x000, // I2S control (bit 0 = TX enable)
-    KL_I2S_FRAME_CNT = 0x004, // frame counter / word select
-    KL_I2S_STATUS    = 0x008, // status
-    KL_I2S_CLK_CFG   = 0x00C, // serial clock configuration
-    KL_I2S_FIFO      = 0x010, // data FIFO (4 × 32-bit words)
+    KL_I2S_INTR_CTL     = 0x000, // interrupt enable/pending
+    KL_I2S_CTRL         = 0x010, // serial format (clock src, MCLK/SCLK div, format)
+    KL_I2S_CODEC_MSG_OUT = 0x020, // codec message output
+    KL_I2S_CODEC_MSG_IN  = 0x030, // codec message input
+    KL_I2S_FRAME_CNT    = 0x040, // frame counter
+    KL_I2S_FRAME_MATCH  = 0x050, // frame match interrupt threshold
+    KL_I2S_DATA_WORD_SIZES = 0x060, // ch count + word size for in/out
+    KL_I2S_PEAK_SEL     = 0x070, // peak level selector
+    KL_I2S_PEAK_IN0     = 0x080, // peak level input 0
+    KL_I2S_PEAK_IN1     = 0x090, // peak level input 1
 };
 
 /** KeyLargo DBDMA channel layout within the 0x08 sub-block.
- *  Each channel occupies 0x100 bytes; channel 8 = audio out, 9 = audio in. */
+ *  Per the Linux AOA i2sbus driver, the I2S TX/RX DMA channels are at
+ *  offsets 0x000/0x100 (channels 0/1), NOT channels 8/9. */
 enum KeyLargoDmaCh : uint32_t {
-    KL_DMA_AUDIO_OUT = 8,
-    KL_DMA_AUDIO_IN  = 9,
+    KL_DMA_AUDIO_OUT = 0,
+    KL_DMA_AUDIO_IN  = 1,
 };
 
 class KeyLargo : public PCIDevice, public InterruptCtrl {
@@ -191,6 +198,7 @@ private:
     ViaPmu*       viapmu;
     OpenPic*      openpic;
     EsccController* escc;
+    Intrepid*     intrepid = nullptr;
 
     uint32_t base_addr   = 0;
     int      iomem_size  = 0x80000;
@@ -209,11 +217,17 @@ private:
 
     uint64_t timer_reset_ns = 0; // virtual ns at which the timer counter was reset
 
-    // I2S state
-    uint32_t i2s_ctrl      = 0; // I2S control register
-    uint32_t i2s_frame_cnt = 0;
-    uint32_t i2s_status    = 0;
-    uint32_t i2s_clk_cfg   = 0;
+    // I2S state (per Linux sound/aoa/soundbus/i2sbus/interface.h)
+    uint32_t i2s_intr_ctl      = 0;
+    uint32_t i2s_serial_fmt    = 0;
+    uint32_t i2s_codec_msg_out = 0;
+    uint32_t i2s_codec_msg_in  = 0;
+    uint32_t i2s_frame_cnt     = 0;
+    uint32_t i2s_frame_match   = 0;
+    uint32_t i2s_data_word_sz  = 0;
+    uint32_t i2s_peak_sel      = 0;
+    uint32_t i2s_peak_in0      = 0;
+    uint32_t i2s_peak_in1      = 0;
 
     // Sound output via I2S: DMA channel pulls PCM from guest RAM,
     // SoundServer feeds it to the host audio device.

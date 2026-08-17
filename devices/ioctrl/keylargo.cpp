@@ -25,6 +25,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <cpu/ppc/ppcemu.h>
 #include <devices/deviceregistry.h>
 #include <devices/ioctrl/keylargo.h>
+#include <devices/memctrl/intrepid.h>
 #include <loguru.hpp>
 #include <machines/machinebase.h>
 
@@ -54,6 +55,10 @@ KeyLargo::KeyLargo() : PCIDevice("KeyLargo"), InterruptCtrl() {
     this->viapmu = dynamic_cast<ViaPmu*>(gMachineObj->get_comp_by_name("ViaPmu"));
     this->openpic = dynamic_cast<OpenPic*>(gMachineObj->get_comp_by_name("OpenPic"));
 
+    // get Intrepid for config window forwarding (the boot ROM's config
+    // window at 0x80008000 overlaps the DBDMA register block)
+    this->intrepid = dynamic_cast<Intrepid*>(gMachineObj->get_comp_by_name("Intrepid"));
+
     // create the ESCC (Z8530) serial controller
     this->escc = new EsccController();
 }
@@ -62,13 +67,12 @@ int KeyLargo::device_postinit()
 {
     // The boot ROM and Open Firmware access the mac-io MMIO window at the
     // fixed device-tree address 0x80000000 without assigning BAR0 first
-    // (e.g. reading via-pmu at 0x80016000 during early boot). Map it now,
-    // in two chunks around the UniNorth config window at 0x80008000.
+    // (e.g. reading via-pmu at 0x80016000 during early boot). Map the full
+    // 512 KiB now (the old Intrepid config window at 0x80008000 has been
+    // removed from Intrepid and is handled via forwarding in dbdma_read/write).
     this->base_addr = KL_BAR0_BASE;
     this->host_instance->pci_register_mmio_region(KL_BAR0_BASE,
-        KL_BAR0_CHUNK1_SIZE, this);
-    this->host_instance->pci_register_mmio_region(KL_BAR0_BASE + KL_BAR0_CHUNK2_OFFSET,
-        KL_BAR0_CHUNK2_SIZE, this);
+        this->iomem_size, this);
     LOG_F(INFO, "%s: mapped MMIO window at 0x%X (size 0x%X)", this->name.c_str(),
         KL_BAR0_BASE, this->iomem_size);
 
@@ -356,30 +360,49 @@ uint64_t KeyLargo::timer_count() const
 
 /* ---- I2S (sound) sub-block at mac-io + 0x10000 ----
  *
- *  The boot ROM configures I2S clocks and format, then starts DBDMA
- *  channel 8 (audio out) to stream PCM samples.  The I2S TX data path
- *  is wired to the host SoundServer so that the boot chime plays through
- *  the host audio device.
+ *  Per Linux sound/aoa/soundbus/i2sbus/interface.h.
+ *  The boot ROM configures clocks and format, then starts DBDMA channel 0
+ *  (audio out) to stream PCM samples to the Toonie DAC via I2S TX.
  *
  *  Register map (offsets relative to sub-block base 0x80010000):
- *    0x000  I2S control    (bit 0 = TX enable)
- *    0x004  frame counter
- *    0x008  status          (read-only, 0 = idle)
- *    0x00C  serial clock config
- *    0x010  data FIFO       (write-only, ignored – DMA feeds data directly)
+ *    0x000  intr_ctl          Interrupt enable/pending bits
+ *    0x010  serial_format     Clock source, MCLK/SCLK div, serial format
+ *    0x020  codec_msg_out     Codec message output
+ *    0x030  codec_msg_in      Codec message input
+ *    0x040  frame_count       Current frame count
+ *    0x050  frame_match       Frame match interrupt threshold
+ *    0x060  data_word_sizes   Ch count + word size for in/out
+ *    0x070  peak_level_sel    Peak level selector
+ *    0x080  peak_level_in0    Peak level input 0
+ *    0x090  peak_level_in1    Peak level input 1
  */
 
 uint32_t KeyLargo::i2s_read(uint32_t offset, int size)
 {
     switch (offset & ~3) {
+    case KL_I2S_INTR_CTL:
+        /* Default: clocks stopped (bit 24) + pending clocks stopped (bit 24).
+         * The boot ROM polls this waiting for bit 24 to indicate I2S is
+         * ready for configuration.  Without clocks running, stopped = true. */
+        return this->i2s_intr_ctl | (1 << 24);
     case KL_I2S_CTRL:
-        return this->i2s_ctrl;
+        return this->i2s_serial_fmt;
+    case KL_I2S_CODEC_MSG_OUT:
+        return this->i2s_codec_msg_out;
+    case KL_I2S_CODEC_MSG_IN:
+        return this->i2s_codec_msg_in;
     case KL_I2S_FRAME_CNT:
         return this->i2s_frame_cnt;
-    case KL_I2S_STATUS:
-        return this->i2s_status;
-    case KL_I2S_CLK_CFG:
-        return this->i2s_clk_cfg;
+    case KL_I2S_FRAME_MATCH:
+        return this->i2s_frame_match;
+    case KL_I2S_DATA_WORD_SIZES:
+        return this->i2s_data_word_sz;
+    case KL_I2S_PEAK_SEL:
+        return this->i2s_peak_sel;
+    case KL_I2S_PEAK_IN0:
+        return this->i2s_peak_in0;
+    case KL_I2S_PEAK_IN1:
+        return this->i2s_peak_in1;
     default:
         if (!(this->unsupported_read_mask & (1 << KL_SUB_I2S))) {
             this->unsupported_read_mask |= (1 << KL_SUB_I2S);
@@ -393,25 +416,27 @@ uint32_t KeyLargo::i2s_read(uint32_t offset, int size)
 void KeyLargo::i2s_write(uint32_t offset, uint32_t value, int size)
 {
     switch (offset & ~3) {
-    case KL_I2S_CTRL: {
-        uint32_t old = this->i2s_ctrl;
-        this->i2s_ctrl = value;
-        // bit 0 = I2S TX enable
-        if ((value & 1) && !(old & 1)) {
-            this->i2s_dma_out_start();
-        } else if (!(value & 1) && (old & 1)) {
-            this->i2s_dma_out_stop();
-        }
+    case KL_I2S_INTR_CTL:
+        this->i2s_intr_ctl = value;
         break;
-    }
+    case KL_I2S_CTRL:
+        this->i2s_serial_fmt = value;
+        break;
+    case KL_I2S_CODEC_MSG_OUT:
+        this->i2s_codec_msg_out = value;
+        break;
     case KL_I2S_FRAME_CNT:
         this->i2s_frame_cnt = value;
         break;
-    case KL_I2S_CLK_CFG:
-        this->i2s_clk_cfg = value;
+    case KL_I2S_FRAME_MATCH:
+        this->i2s_frame_match = value;
         break;
-    case KL_I2S_FIFO:
-        // write to TX FIFO ignored – data arrives via DMA
+    case KL_I2S_DATA_WORD_SIZES:
+        this->i2s_data_word_sz = value;
+        LOG_F(2, "%s: I2S data_word_sizes = 0x%08x", this->get_name().c_str(), value);
+        break;
+    case KL_I2S_PEAK_SEL:
+        this->i2s_peak_sel = value;
         break;
     default:
         if (!(this->unsupported_write_mask & (1 << KL_SUB_I2S))) {
@@ -468,12 +493,31 @@ void KeyLargo::i2s_dma_out_stop()
 /* ---- DBDMA sub-block at mac-io + 0x08000 ----
  *
  *  The DBDMA controller provides 16 DMA channels, each 0x100 bytes apart.
- *  Channel 8 = audio out (TX), channel 9 = audio in (RX).
- *  Only the audio channels are wired; the rest return 0 / are ignored.
- */
+ *  Per the Linux AOA i2sbus driver, channel 0 = audio out (TX), channel 1 =
+ *  audio in (RX).  Other channels are used by ATA, etc.
+ *
+ *  The boot ROM's memory-controller config window also lives in this address
+ *  range (offsets 0x000/0x004/0x00C/0x014 and 0x800/0x804/0x80C/0x814).
+ *  These are forwarded to Intrepid's config window handler. */
+
+/** Check if offset is an Intrepid config window register.
+ *  Returns true if the access should be forwarded to Intrepid. */
+static inline bool is_intrepid_cfg_win(uint32_t offset)
+{
+    uint32_t reg = offset & 0x1F;
+    // Window 0: offsets 0x000-0x01F, Window 1: offsets 0x800-0x81F
+    if ((offset & 0x7FF) < 0x020) {
+        return (reg == 0x00 || reg == 0x04 || reg == 0x0C || reg == 0x14);
+    }
+    return false;
+}
 
 uint32_t KeyLargo::dbdma_read(uint32_t offset, int size)
 {
+    // Forward Intrepid config window reads
+    if (is_intrepid_cfg_win(offset) && this->intrepid)
+        return this->intrepid->read_config_window(offset, size);
+
     int ch = offset >> 8;
 
     switch (ch) {
@@ -493,6 +537,12 @@ uint32_t KeyLargo::dbdma_read(uint32_t offset, int size)
 
 void KeyLargo::dbdma_write(uint32_t offset, uint32_t value, int size)
 {
+    // Forward Intrepid config window writes
+    if (is_intrepid_cfg_win(offset) && this->intrepid) {
+        this->intrepid->write_config_window(offset, value, size);
+        return;
+    }
+
     int ch = offset >> 8;
 
     switch (ch) {

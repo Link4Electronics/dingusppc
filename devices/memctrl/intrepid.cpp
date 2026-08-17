@@ -118,9 +118,10 @@ Intrepid::Intrepid() : MemCtrlBase(), PCIDevice("Intrepid"), PCIHost()
     this->add_mmio_region(UNI_N_I2C_BLOCK, 0x1000, this);
     this->add_mmio_region(UNI_N_CLK_BLOCK, 0x1000, this);
 
-    // add memory mapped I/O region for the boot ROM's early PCI quiesce
-    // config window (0x80008000 and 0x80008800 within a single 4 KiB range)
-    this->add_mmio_region(UNI_N_CONFIG_WINDOW, 0x1000, this);
+    // NOTE: the boot ROM config window at 0x80008000 is NOT registered here
+    // because it overlaps the KeyLargo DBDMA register block at the same
+    // address. KeyLargo's DBDMA handler forwards config window accesses to
+    // Intrepid's read_config_window/write_config_window methods directly.
 
     // add memory mapped I/O regions for the PCI configuration windows.
     // Each window has a config addr register at base + 0x800000 and a

@@ -172,6 +172,11 @@ public:
         registers are not emulated yet). */
     void setup_ram(int capacity_megs);
 
+    /** Config window handlers — called from KeyLargo's DBDMA handler because
+     *  the config window at 0x80008000 overlaps the DBDMA register block. */
+    uint32_t read_config_window(uint32_t offset, int size);
+    void write_config_window(uint32_t offset, uint32_t value, int size);
+
 protected:
     /* my own PCI configuration registers access (main bus host bridge) */
     uint32_t pci_cfg_read(uint32_t reg_offs, AccessDetails &details) override;
@@ -180,8 +185,6 @@ protected:
 private:
     uint32_t read_unin_register(uint32_t offset, int size);
     void write_unin_register(uint32_t offset, uint32_t value, int size);
-    uint32_t read_config_window(uint32_t offset, int size);
-    void write_config_window(uint32_t offset, uint32_t value, int size);
     uint32_t read_i2c_register(uint32_t offset, int size);
     void write_i2c_register(uint32_t offset, uint32_t value, int size);
     uint32_t read_clk_register(uint32_t offset, int size);
