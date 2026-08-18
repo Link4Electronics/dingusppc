@@ -22,7 +22,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // The AltiVec (VMX) opcodes for the processor - ppcaltivecopcodes.cpp
 
 #include "ppcemu.h"
-#include "ppcmacros.h"
+#include "ppcdechelpers.h"
 #include "ppcmmu.h"
 #include <cstdint>
 #include <cstring>
